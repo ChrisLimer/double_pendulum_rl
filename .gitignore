@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+
+# Virtual environments
+.venv
+
+# Training output (metrics + checkpoints) and saved model weights
+runs/
+experiments/results/params/
+experiments/results/log.txt
+*.npz
+*.pkl
+*.ckpt
+
+# Local tool and OS files
+.claude/
+.DS_Store

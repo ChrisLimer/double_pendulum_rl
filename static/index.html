@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pendulum Training</title>
+  <style>
+    :root {
+      --bg: #111316; --panel: #1a1d22; --border: #2a2e35; --text: #dde1e6; --muted: #8a919b;
+      --accent: #4cc2ff; --good: #5fd68a; --bad: #ff6b6b;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+    header { display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; align-items: center; padding: 0.75rem 1rem;
+             border-bottom: 1px solid var(--border); }
+    header h1 { font-size: 1rem; margin: 0; }
+    .muted { color: var(--muted); }
+    .num { font-variant-numeric: tabular-nums; }
+    #progress { flex: 1; min-width: 160px; height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+    #progress-fill { height: 100%; width: 0; background: var(--accent); transition: width 0.5s; }
+    main { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 1rem; padding: 1rem; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem; }
+    #sim-canvas { display: block; width: 100%; aspect-ratio: 16 / 11; }
+    .controls { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin: 0.75rem 0 0.5rem; }
+    select, button { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px;
+                     padding: 0.35rem 0.6rem; font: inherit; }
+    button { cursor: pointer; }
+    button:hover, select:hover { border-color: var(--accent); }
+    #sim-info { display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 0.75rem; }
+    #charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; align-content: start; }
+    @media (max-width: 500px) { #charts { grid-template-columns: 1fr; } }
+    .chart { height: 190px; }
+    #sim-canvas { cursor: grab; touch-action: none; outline: none; }
+    #sim-canvas.dragging { cursor: grabbing; }
+    .hint { margin: 0.5rem 0 0; }
+    .small { font-size: 12px; margin: 0.75rem 0 0; }
+    a { color: var(--accent); }
+    kbd { border: 1px solid var(--border); border-radius: 4px; padding: 0 0.3rem; font: 12px ui-monospace, monospace; }
+    input[type=range] { vertical-align: middle; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Double pendulum · PPO</h1>
+    <span>run <b id="run-name">–</b></span>
+    <label>show <select id="run-select"><option value="">Default</option></select></label>
+    <div id="progress"><div id="progress-fill"></div></div>
+    <span class="num" id="progress-text">waiting for training…</span>
+  </header>
+
+  <main>
+    <section class="panel">
+      <canvas id="sim-canvas" tabindex="0"></canvas>
+      <p class="hint muted">Drag the pendulum tip with the mouse, or hold <kbd>←</kbd> <kbd>→</kbd> to push it.
+        <kbd>Space</kbd> starts a new episode.</p>
+      <div class="controls">
+        <label>Checkpoint
+          <select id="ckpt"><option value="latest">Latest (auto-follow)</option></select>
+        </label>
+        <label>Start
+          <select id="start-mode">
+            <option value="still" selected>Hanging still</option>
+            <option value="hanging">Hanging, perturbed</option>
+            <option value="mix">Mixed starts</option>
+            <option value="random">Fully random</option>
+            <option value="upright">Near upright</option>
+          </select>
+        </label>
+        <button id="restart">New episode</button>
+      </div>
+      <div class="controls">
+        <label>Push strength <input id="push-strength" type="range" min="2" max="30" value="10">
+          <span id="push-strength-value" class="num">10 N</span></label>
+        <label><input id="endless" type="checkbox"> Endless (no 20 s limit)</label>
+      </div>
+      <div id="sim-info" class="num">
+        <span class="muted">policy</span><span id="info-ckpt">–</span>
+        <span class="muted">checkpoint test</span><span id="info-eval">–</span>
+        <span class="muted">time</span><span id="info-time">–</span>
+        <span class="muted">upright</span><span id="info-upright">–</span>
+        <span class="muted">status</span><span id="info-status">–</span>
+      </div>
+      <p class="muted small"><a id="parity-link" href="parity.html">Python ↔ JS physics check</a></p>
+    </section>
+
+    <section id="charts"></section>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
