@@ -197,6 +197,7 @@ def policy(ckpt: str = "latest", run: str | None = None):
             "layers": pack("actor"), "critic": pack("critic"),
             "value_scale": value_scale(path, path.stat().st_mtime),
             # mirror-symmetric networks (see dprl/networks.py) and the time-to-stable heads
+            "bins": np.asarray(params["bins"]).tolist() if "bins" in params else None,
             "symmetric": "sym" in params, "time_max": TIME_MAX if np.shape(params["critic"][-1]["b"])[0] >= 3 else None}
 
 

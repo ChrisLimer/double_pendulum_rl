@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import optax
 
 from .env import DoublePendulumCart, EnvState, SUCCESS_FRACTION, SUCCESS_WINDOW, stable_obs
-from .networks import actor, critic, critic_outputs, gaussian_logp, init_params
+from .networks import actor, critic, critic_outputs, gaussian_logp, init_params, policy_logits
 
 # Time-to-stable prediction: the critic's heads 1 and 2 predict T / TIME_MAX and E[T^2] / TIME_MAX^2,
 # with T the time until the state is stable upright (env.stable_obs). Learned by TD like the value
@@ -52,6 +52,7 @@ class PPOConfig:
     symmetric: bool = True        # mirror-symmetric policy and critic (see networks.py)
     time_head: bool = True        # critic heads predicting the time to stable upright
     time_coef: float = 0.5        # weight of the time-prediction loss
+    action_bins: int = 0          # > 0: categorical policy over this many force levels in [-1, 1]
 
     @property
     def steps_per_update(self):
@@ -141,7 +142,7 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
 
     def init(key):
         k_params, k_env, key = jax.random.split(key, 3)
-        params = init_params(k_params, env.obs_dim, env.act_dim, cfg.hidden, cfg.symmetric, heads)
+        params = init_params(k_params, env.obs_dim, env.act_dim, cfg.hidden, cfg.symmetric, heads, cfg.action_bins)
         env_state = jax.vmap(env.reset)(jax.random.split(k_env, cfg.num_envs))
         obs = jax.vmap(env.obs)(env_state)
         return Runner(params, tx.init(params), env_state, obs, key, Stats.zeros(env.obs_dim),
@@ -157,15 +158,27 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
         runner, knobs = carry
         key, k_act, k_env = jax.random.split(runner.key, 3)
         obs_n = normalize(runner, runner.obs)
-        mean, log_std = actor(runner.params, obs_n)
-        action = mean + jnp.exp(log_std) * jax.random.normal(k_act, mean.shape)
-        logp = gaussian_logp(action, mean, log_std)
+        if cfg.action_bins:
+            # action stores the bin index; the environment gets the force level
+            logits = policy_logits(runner.params, obs_n)
+            index = jax.random.categorical(k_act, logits)
+            logp = jnp.take_along_axis(jax.nn.log_softmax(logits), index[:, None], axis=-1)[:, 0]
+            bins = runner.params["bins"]
+            env_action, action = bins[index][:, None], index[:, None].astype(jnp.float32)
+            probs = jax.nn.softmax(logits)
+            policy_std = jnp.sqrt(jnp.maximum(probs @ bins**2 - (probs @ bins) ** 2, 0.0))
+        else:
+            mean, log_std = actor(runner.params, obs_n)
+            action = env_action = mean + jnp.exp(log_std) * jax.random.normal(k_act, mean.shape)
+            logp = gaussian_logp(action, mean, log_std)
+            policy_std = jnp.broadcast_to(jnp.exp(log_std[:, 0]), logp.shape)
         outputs = critic_outputs(runner.params, obs_n)
         value = outputs[..., 0]
         env_knobs = {**knobs, "replay_s": runner.replay_s, "replay_n": runner.replay_n}
         env_state, obs, reward, info = jax.vmap(env.step_autoreset, in_axes=(0, 0, 0, None))(
-            jax.random.split(k_env, cfg.num_envs), runner.env_state, action, env_knobs
+            jax.random.split(k_env, cfg.num_envs), runner.env_state, env_action, env_knobs
         )
+        info["policy_std"] = policy_std
         info["raw_reward"] = reward
         ret, ret_stats = runner.ret, runner.ret_stats
         if cfg.reward_norm:
@@ -235,8 +248,12 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
 
     def loss_fn(params, mb):
         obs, action, old_logp, old_value, adv, target, time_target = mb
-        mean, log_std = actor(params, obs)
-        logp = gaussian_logp(action, mean, log_std)
+        if cfg.action_bins:
+            log_probs = jax.nn.log_softmax(policy_logits(params, obs))
+            logp = jnp.take_along_axis(log_probs, action.astype(jnp.int32), axis=-1)[:, 0]
+        else:
+            mean, log_std = actor(params, obs)
+            logp = gaussian_logp(action, mean, log_std)
         log_ratio = logp - old_logp
         ratio = jnp.exp(log_ratio)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
@@ -249,7 +266,10 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
         value_clipped = old_value + jnp.clip(value - old_value, -cfg.clip_eps, cfg.clip_eps)
         v_loss = 0.5 * jnp.maximum((value - target) ** 2, (value_clipped - target) ** 2).mean()
 
-        entropy = jnp.sum(params["log_std"] + 0.5 * jnp.log(2 * jnp.pi * jnp.e))
+        if cfg.action_bins:
+            entropy = -(jnp.exp(log_probs) * log_probs).sum(-1).mean()
+        else:
+            entropy = jnp.sum(params["log_std"] + 0.5 * jnp.log(2 * jnp.pi * jnp.e))
         time_loss = ((outputs[..., 1:3] - time_target) ** 2).sum(-1).mean() if cfg.time_head else 0.0
         loss = pg_loss + cfg.vf_coef * v_loss - cfg.ent_coef * entropy + cfg.time_coef * time_loss
         aux = {
@@ -312,7 +332,7 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
             swingup_time=masked_mean(info["swingup_time"], info["swingup_episode"] & info["reached_top"]),
             # evaluator-style success of hanging starts (drives the curriculum)
             swingup_success=masked_mean(info["swingup_success"], info["swingup_episode"]),
-            action_std=jnp.exp(params["log_std"]).mean(),
+            action_std=traj.info["policy_std"].mean(),  # std of the policy's force distribution
             shield_rate=info["shielded"].mean(),  # fraction of steps the track shield overrode
             reward_raw=info["raw_reward"].mean(),
             return_std=jnp.sqrt(runner.ret_stats.var[0]),

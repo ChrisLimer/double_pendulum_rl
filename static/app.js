@@ -186,7 +186,7 @@ const live = {
 async function getPolicy(name) {
   if (!policies.has(name)) {
     const d = await getJSON(`/api/policy?ckpt=${encodeURIComponent(name)}`);
-    policies.set(d.checkpoint, { policy: sim.loadPolicy(d.layers, d.symmetric), env: d.env, meta: d.meta,
+    policies.set(d.checkpoint, { policy: sim.loadPolicy(d.layers, d.symmetric, d.bins), env: d.env, meta: d.meta,
                                  critic: d.critic ? sim.loadPolicy(d.critic, d.symmetric) : null,
                                  valueScale: d.value_scale ?? 1, timeMax: d.time_max, symmetric: d.symmetric });
   }

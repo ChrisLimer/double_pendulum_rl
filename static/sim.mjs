@@ -133,9 +133,10 @@ function f32(b64) {
 }
 
 // From the /api/policy response: [{shape: [n_in, n_out], w, b}] with base64 float32.
-export function loadPolicy(layers, symmetric = false) {
+export function loadPolicy(layers, symmetric = false, bins = null) {
   const net = layers.map((l) => ({ nIn: l.shape[0], nOut: l.shape[1], w: f32(l.w), b: f32(l.b) }));
   net.symmetric = symmetric;
+  net.bins = bins;  // force levels of a categorical policy (null: Gaussian mean)
   return net;
 }
 
@@ -170,6 +171,16 @@ function tieBreak(o) {
 
 // loadPolicy(layers, symmetric) marks the network; the functions below apply the symmetry.
 function actorMean(policy, o) {
+  if (policy.bins) {  // categorical policy: the most likely force level (lowest bin on ties)
+    let logits = mlp(policy, o);
+    if (policy.symmetric) {
+      const mirrored = mlp(policy, mirrorObs(o));
+      logits = logits.map((v, k) => (v + mirrored[logits.length - 1 - k]) / 2);
+    }
+    let best = 0;
+    for (let k = 1; k < logits.length; k++) if (logits[k] > logits[best]) best = k;
+    return policy.bins[best];
+  }
   const m = mlp(policy, o)[0];
   return policy.symmetric ? (m - mlp(policy, mirrorObs(o))[0]) / 2 + tieBreak(o) : m;
 }

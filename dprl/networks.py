@@ -14,7 +14,14 @@ direction only within ~0.05 (in observation units) of the hanging-still fixed po
 the tie; everywhere else the policy is exactly symmetric. (At the upright fixed point a zero action
 is right, so no tie-break there.)
 
-The critic can have extra outputs (heads); value() is output 0, see ppo.py for the others."""
+The critic can have extra outputs (heads); value() is output 0, see ppo.py for the others.
+
+Discrete actions (optional, params contain "bins", the K force levels in [-1, 1], symmetric
+around 0): the actor outputs K logits of a categorical policy instead of a Gaussian mean. The
+mirror of action bin k is bin K-1-k, so the symmetric version averages f(o) with the reversed
+f(M o). actor() then returns the most likely level as its "mean", so every deterministic user of
+actor() (evaluators, diagnostics) works unchanged; at an exact tie, argmax picks the lowest bin,
+which breaks the symmetric hanging-still tie by itself."""
 
 import math
 
@@ -45,15 +52,17 @@ TIE_BREAK_FORCE = 0.3   # action units (x max_force)
 TIE_BREAK_WIDTH = 0.05  # observation units
 
 
-def init_params(key, obs_dim, act_dim, hidden=(64, 64), symmetric=False, critic_heads=1):
+def init_params(key, obs_dim, act_dim, hidden=(64, 64), symmetric=False, critic_heads=1, action_bins=0):
     ka, kc = jax.random.split(key)
     params = {
-        "actor": init_mlp(ka, [obs_dim, *hidden, act_dim], out_scale=0.01),
+        "actor": init_mlp(ka, [obs_dim, *hidden, action_bins or act_dim], out_scale=0.01),
         "critic": init_mlp(kc, [obs_dim, *hidden, critic_heads], out_scale=1.0),
         "log_std": jnp.full(act_dim, -0.5),  # state-independent Gaussian std
     }
     if symmetric:
         params["sym"] = jnp.zeros(())  # marker: the dict structure is static under jit
+    if action_bins:
+        params["bins"] = jnp.linspace(-1.0, 1.0, action_bins)
     return params
 
 
@@ -71,8 +80,20 @@ def mlp_and_mirror(layers, obs):
     return out[0], out[1]
 
 
+def policy_logits(params, obs):
+    """Categorical policy over params["bins"]: (..., K) logits."""
+    if "sym" in params:
+        direct, mirrored = mlp_and_mirror(params["actor"], obs)
+        return (direct + mirrored[..., ::-1]) / 2
+    return mlp(params["actor"], obs)
+
+
 def actor(params, obs):
-    """Gaussian policy: returns (mean, log_std). Works for single or batched obs."""
+    """Gaussian policy: returns (mean, log_std). Works for single or batched obs.
+    For a discrete policy, "mean" is the most likely force level (and log_std is unused)."""
+    if "bins" in params:
+        level = params["bins"][jnp.argmax(policy_logits(params, obs), axis=-1)][..., None]
+        return level, jnp.zeros_like(level)
     if "sym" in params:
         direct, mirrored = mlp_and_mirror(params["actor"], obs)
         mean = (direct - mirrored) / 2 + tie_break(obs)

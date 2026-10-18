@@ -261,3 +261,27 @@ def test_stable_upright_test():
     assert stable_obs(env.obs(s._replace(q=jnp.array([1.0, 0.1, -0.1]), qd=jnp.array([0.5, 1.0, -1.0]))))
     assert not stable_obs(env.obs(s._replace(q=jnp.array([0.0, 0.3, 0.0]), qd=jnp.zeros(3))))
     assert not stable_obs(env.obs(s._replace(q=jnp.zeros(3), qd=jnp.array([0.0, 2.0, 0.0]))))
+
+
+def test_discrete_policy_trains_and_is_symmetric(tmp_path, monkeypatch):
+    from dprl.networks import MIRROR, actor, init_params, policy_logits
+    params = init_params(jax.random.key(0), 8, 1, (32, 32), symmetric=True, action_bins=5)
+    params["actor"][-1]["w"] = params["actor"][-1]["w"] * 100
+    obs = jax.vmap(DoublePendulumCart().obs)(jax.vmap(lambda k: DoublePendulumCart().reset(k, mix=(0.0, 1.0, 0.0)))(
+        jax.random.split(jax.random.key(1), 32)))
+    np.testing.assert_allclose(policy_logits(params, obs * MIRROR), policy_logits(params, obs)[:, ::-1], atol=1e-5)
+    level, _ = actor(params, obs)
+    assert set(np.round(np.asarray(level[:, 0]), 3)) <= {-1.0, -0.5, 0.0, 0.5, 1.0}
+    # One training chunk with a 3-level policy, then a checkpoint round trip.
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path)
+    env = DoublePendulumCart()
+    cfg = PPOConfig(total_timesteps=8 * 32 * 4, num_envs=8, num_steps=32, num_minibatches=4,
+                    updates_per_chunk=2, hidden=(32, 32), action_bins=3)
+    init, train_chunk = make_trainer(cfg, env)
+    runner, metrics = train_chunk(init(jax.random.key(0)), Curriculum().knobs(0.1))
+    assert np.isfinite(metrics["loss"]).all() and (metrics["action_std"] > 0.5).all()
+    run = runs.new_run(cfg, env, Curriculum())
+    runs.save_checkpoint(run, runner.params, {"update": 2, "env_steps": 512})
+    _, cfg2, env2 = runs.load_config(run)
+    loaded, _ = runs.load_checkpoint(runs.list_checkpoints(run)[-1], cfg2, env2)
+    np.testing.assert_array_equal(loaded["bins"], [-1.0, 0.0, 1.0])
