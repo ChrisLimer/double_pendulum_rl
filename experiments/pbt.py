@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "experiments"))
 from dprl.env import DoublePendulumCart
 from dprl.curriculum import Curriculum
-from dprl.ppo import PPOConfig, make_trainer
+from dprl.ppo import PPOConfig, export_runner, make_trainer
 from robust_eval import make_robust
 
 name, pop, steps, interval = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
@@ -49,6 +49,11 @@ def score(params):
     s -= 0.02 * r["hang_still"]["t_settled_med"]  # quicker settling is better
     return s, r
 
+def member(i):
+    """Exported (plain MLP) params of population member i."""
+    return export_runner(cfg, jax.tree.map(lambda x: x[i], runners))
+
+
 def stack_knobs(progress):
     ks = [c.knobs(progress) for c in curs]
     return jax.tree.map(lambda *x: jnp.stack(x), *ks)
@@ -63,7 +68,7 @@ while upd < cfg.num_updates:
     for i, c in enumerate(curs):
         c.update(float(np.nanmean(np.asarray(m["swingup_success"][i], dtype=float))))
     if n_chunk % every == 0 and upd < cfg.num_updates:
-        scores = [score(jax.tree.map(lambda x: x[i], runners.params))[0] for i in range(pop)]
+        scores = [score(member(i))[0] for i in range(pop)]
         order = np.argsort(scores)[::-1]
         q = max(1, pop // 4)
         src, dst = order[:q], order[-q:]
@@ -75,7 +80,7 @@ while upd < cfg.num_updates:
                     "copied": {int(d): int(s) for s, d in zip(src, dst)}})
         print(name, json.dumps(log[-1]), f"{(time.time() - t0) / 60:.0f} min", flush=True)
 
-members = [jax.tree.map(lambda x: x[i], runners.params) for i in range(pop)]
+members = [member(i) for i in range(pop)]
 results = [score(p) for p in members]
 order = np.argsort([s for s, _ in results])[::-1]
 # greedy soup: add members (best first) to a weight average while the score does not drop

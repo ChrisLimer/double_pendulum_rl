@@ -186,7 +186,8 @@ const live = {
 async function getPolicy(name) {
   if (!policies.has(name)) {
     const d = await getJSON(`/api/policy?ckpt=${encodeURIComponent(name)}`);
-    policies.set(d.checkpoint, { policy: sim.loadPolicy(d.layers), env: d.env, meta: d.meta });
+    policies.set(d.checkpoint, { policy: sim.loadPolicy(d.layers), env: d.env, meta: d.meta,
+                                 critic: d.critic ? sim.loadPolicy(d.critic) : null, valueScale: d.value_scale ?? 1 });
   }
   return { name, ...policies.get(name) };
 }
@@ -204,7 +205,8 @@ async function startEpisode() {
     }
     const p = await getPolicy(name);
     if (token !== live.token) return;
-    Object.assign(live, { env: p.env, policy: p.policy, ckpt: p.name, meta: p.meta });
+    Object.assign(live, { env: p.env, policy: p.policy, ckpt: p.name, meta: p.meta, critic: p.critic,
+                          valueScale: p.valueScale });
     resetEpisode();
   } catch (e) {
     if (token !== live.token) return;
@@ -217,7 +219,8 @@ async function startEpisode() {
 
 function resetEpisode() {
   const s = sim.reset($("start-mode").value);
-  Object.assign(live, { q: s.q, qd: s.qd, prevQ: s.q, t: 0, uprightTime: 0, acc: 0, ended: null, trail: [] });
+  Object.assign(live, { q: s.q, qd: s.qd, prevQ: s.q, t: 0, uprightTime: 0, acc: 0, ended: null, trail: [],
+                        side: 0, sideSince: 0, flips: 0 });
 }
 
 // External force on the tip from the user: mouse spring while dragging, or arrow keys.
@@ -234,9 +237,37 @@ function userTipForce() {
   return [dir * max, 0];
 }
 
+// Symmetry: the system is the same under the mirror map (x, angles, velocities -> negated; force
+// -> -force), but a policy can learn a preferred swing direction. "auto" evaluates the critic on
+// the state and on its mirror image and acts with the side that predicts the higher return:
+// a(s) = pi(s), or a(s) = -pi(mirror(s)) when acting mirrored. It only switches when the other
+// side is better by SWITCH_MARGIN (relative) and the current side has been used for SWITCH_DWELL,
+// so it does not flip-flop between two nearly equal estimates.
+const SWITCH_MARGIN = 0.02, SWITCH_DWELL = 0.25;
+
+function chooseAction() {
+  const env = live.env, mode = $("symmetry").value;
+  const o = sim.obs(env, live.q, live.qd);
+  const m = sim.mirror(live.q, live.qd), om = sim.obs(env, m.q, m.qd);
+  live.value = live.critic ? sim.value(live.critic, o) * live.valueScale : null;
+  live.valueMirror = live.critic ? sim.value(live.critic, om) * live.valueScale : null;
+  if (mode === "off" || !live.critic) live.side = 1;
+  else if (mode === "mirror") live.side = -1;
+  else {
+    const [cur, other] = live.side === -1 ? [live.valueMirror, live.value] : [live.value, live.valueMirror];
+    if (live.side === 0) live.side = live.valueMirror > live.value ? -1 : 1;
+    else if (other - cur > SWITCH_MARGIN * Math.abs(cur) && live.t - live.sideSince >= SWITCH_DWELL) {
+      live.side = -live.side;
+      live.sideSince = live.t;
+      live.flips += 1;
+    }
+  }
+  return live.side === -1 ? -sim.policyAction(live.policy, om) : sim.policyAction(live.policy, o);
+}
+
 function controlStep() {
   const env = live.env;
-  live.action = sim.policyAction(live.policy, sim.obs(env, live.q, live.qd));
+  [live.action, live.shielded] = sim.shield(env, live.q, live.qd, chooseAction());
   live.tipForce = userTipForce();
   live.prevQ = live.q;
   ({ q: live.q, qd: live.qd } = sim.integrate(env, live.q, live.qd, live.action * env.max_force, live.tipForce));
@@ -326,7 +357,7 @@ function draw() {
 
   // Cart, links and masses.
   const [cx, cy] = px(pivot[0] - 0.2, 0.08);
-  ctx.fillStyle = "#3a4250";
+  ctx.fillStyle = live.shielded ? "#ffb04c" : "#3a4250";  // orange while the track shield brakes
   ctx.fillRect(cx, cy, 0.4 * scale, 0.16 * scale);
   ctx.strokeStyle = text;
   ctx.lineWidth = Math.max(3, 0.03 * scale);
@@ -381,9 +412,14 @@ function updateInfo() {
   $("info-time").textContent = `${live.t.toFixed(2)} s / ${limit}`;
   const frac = live.t > 0 ? live.uprightTime / live.t : 0;
   $("info-upright").textContent = `${(100 * frac).toFixed(0)}% of the time`;
+  const v = (x) => (x == null ? "–" : x.toFixed(1));
+  $("info-value").textContent = live.value == null ? "–"
+    : `V(s) ${v(live.value)} · V(mirror) ${v(live.valueMirror)}`;
+  $("info-side").textContent = $("symmetry").value === "off" ? "off"
+    : `acting ${live.side === -1 ? "mirrored" : "as is"} · ${live.flips} switch${live.flips === 1 ? "" : "es"}`;
   const up = sim.isUpright(live.q);
   $("info-status").textContent = live.ended !== null ? `${live.endReason} · loading next…`
-    : live.mouse || live.tipForce[0] ? "being pushed" : up ? "balancing" : "swinging up";
+    : live.shielded ? "track shield braking" : live.mouse || live.tipForce[0] ? "being pushed" : up ? "balancing" : "swinging up";
 }
 
 // ---- input -----------------------------------------------------------------
@@ -416,6 +452,7 @@ window.addEventListener("blur", () => live.keys.clear());
 $("push-strength").addEventListener("input", (e) => ($("push-strength-value").textContent = `${e.target.value} N`));
 $("ckpt").addEventListener("change", startEpisode);
 $("start-mode").addEventListener("change", startEpisode);
+$("symmetry").addEventListener("change", startEpisode);
 $("restart").addEventListener("click", startEpisode);
 $("run-select").addEventListener("change", (e) => {
   const url = new URL(location.href);

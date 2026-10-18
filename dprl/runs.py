@@ -1,7 +1,7 @@
 """On-disk layout shared by the trainer (writer) and the dashboard (reader).
 
-runs/<timestamp>/
-    config.json          env + PPO settings, written once at start
+runs/<timestamp>/              (or runs/<group>/<timestamp>_<label>/ for a group of runs that
+    config.json                 the dashboard ranks on a leaderboard)          env + PPO settings, written once at start
     metrics.jsonl        one JSON line per PPO update, appended as training runs
     checkpoints/
         ckpt_000120.npz  policy params + metadata, written atomically
@@ -25,19 +25,27 @@ from .ppo import PPOConfig
 RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
 
 
-def new_run(cfg: PPOConfig, env: DoublePendulumCart, curriculum=None) -> Path:
-    run = RUNS_DIR / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+def new_run(cfg: PPOConfig, env: DoublePendulumCart, curriculum=None, group=None, label=None) -> Path:
+    name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + (f"_{label}" if label else "")
+    run = (RUNS_DIR / group / name) if group else RUNS_DIR / name
     (run / "checkpoints").mkdir(parents=True)
     config = {"ppo": asdict(cfg), "env": env.to_dict(), "num_updates": cfg.num_updates,
               "steps_per_update": cfg.steps_per_update,
-              "curriculum": asdict(curriculum) if curriculum else None}
+              "curriculum": asdict(curriculum) if curriculum else None, "label": label}
     (run / "config.json").write_text(json.dumps(config, indent=2))
     return run
 
 
+def all_runs() -> list[Path]:
+    """Runs directly in runs/ and in group folders runs/<group>/."""
+    found = [p.parent for p in RUNS_DIR.glob("*/config.json")] + [p.parent for p in RUNS_DIR.glob("*/*/config.json")]
+    return sorted(found)
+
+
 def latest_run() -> Path | None:
-    runs = sorted(p for p in RUNS_DIR.glob("*") if (p / "config.json").exists())
-    return runs[-1] if runs else None
+    """The most recently started training run (imported checkpoint-only runs excluded)."""
+    runs = [p for p in all_runs() if p.parent.name != "imported"]
+    return max(runs, key=lambda p: (p / "config.json").stat().st_mtime) if runs else None
 
 
 def load_config(run: Path):

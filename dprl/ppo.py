@@ -1,6 +1,15 @@
 """PPO (clipped objective + GAE) in the PureJaxRL style: the whole update, including the
 environment rollout, is one jitted function. Many updates are fused with lax.scan and the
-host only sees the results between chunks (to log metrics and write checkpoints)."""
+host only sees the results between chunks (to log metrics and write checkpoints).
+
+Two standard normalizations (see "What matters in on-policy RL", Andrychowicz et al. 2021):
+- rewards are divided by the running std of the discounted return, so values are O(1) (raw
+  returns are in the hundreds, which also made the 0.2 value clipping very slow); on by default;
+- observations can be standardized with running statistics (obs_norm); export_params() folds
+  that into the first layer, so saved checkpoints are plain MLPs on raw observations. Off by
+  default: with it, 2 of 4 seeds collapsed early (see docs/experiments.md).
+The runner also keeps a replay buffer of hard states (see env.REPLAY_LOOKBACK) that the
+curriculum mixes into the episode starts."""
 
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -9,7 +18,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from .env import DoublePendulumCart, EnvState
+from .env import DoublePendulumCart, EnvState, SUCCESS_FRACTION, SUCCESS_WINDOW
 from .networks import actor, critic, gaussian_logp, init_params
 
 
@@ -24,12 +33,16 @@ class PPOConfig:
     gamma: float = 0.9975         # ~4 s horizon at 100 Hz: a swing-up takes 2-4 s
     gae_lambda: float = 0.975     # 0.95 at 50 Hz, same time scale
     clip_eps: float = 0.2
-    ent_coef: float = 0.0
+    ent_coef: float = 0.005       # without it the better critic let the policy std collapse early
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     lr: float = 3e-4
     hidden: tuple = (256, 256, 256)  # 2 layers never learned the swing-up at 100 Hz (0/4 seeds); 3 did (4/4)
     updates_per_chunk: int = 10   # updates fused into one jit call between host syncs
+    obs_norm: bool = False        # running observation standardization (2 of 4 seeds got stuck with it;
+                                  # the observations are already scaled by hand)
+    reward_norm: bool = True      # divide rewards by the running std of the discounted return
+    replay_size: int = 1024       # hard-state buffer for replay starts
 
     @property
     def steps_per_update(self):
@@ -40,12 +53,50 @@ class PPOConfig:
         return self.total_timesteps // self.steps_per_update
 
 
+class Stats(NamedTuple):
+    """Running mean / variance (parallel Welford)."""
+    mean: jax.Array
+    var: jax.Array
+    count: jax.Array
+
+    @staticmethod
+    def zeros(shape=()):
+        return Stats(jnp.zeros(shape), jnp.ones(shape), jnp.float32(1e-4))
+
+    def update(self, batch):
+        b_mean, b_var, b_count = batch.mean(0), batch.var(0), batch.shape[0]
+        delta, total = b_mean - self.mean, self.count + b_count
+        m2 = self.var * self.count + b_var * b_count + delta**2 * self.count * b_count / total
+        return Stats(self.mean + delta * b_count / total, m2 / total, total)
+
+
 class Runner(NamedTuple):
     params: dict
     opt_state: optax.OptState
     env_state: EnvState
-    obs: jax.Array
+    obs: jax.Array          # raw observations
     key: jax.Array
+    obs_stats: Stats
+    ret: jax.Array          # running discounted return per env (for reward scaling)
+    ret_stats: Stats
+    replay_s: jax.Array     # (replay_size, 6) hard states (q, qd)
+    replay_ptr: jax.Array
+    replay_n: jax.Array
+
+
+def export_params(params, obs_stats: Stats, enabled=True):
+    """Fold the observation standardization into the first layer of actor and critic:
+    ((o - m) / s) W + b = o (W / s) + (b - (m / s) W)."""
+    if not enabled:
+        return params
+    std = jnp.sqrt(obs_stats.var + 1e-8)
+
+    def fold(layers):
+        first = layers[0]
+        w = first["w"] / std[:, None]
+        return [{"w": w, "b": first["b"] - (obs_stats.mean / std) @ first["w"]}, *layers[1:]]
+
+    return {**params, "actor": fold(params["actor"]), "critic": fold(params["critic"])}
 
 
 class Transition(NamedTuple):
@@ -82,24 +133,55 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
         params = init_params(k_params, env.obs_dim, env.act_dim, cfg.hidden)
         env_state = jax.vmap(env.reset)(jax.random.split(k_env, cfg.num_envs))
         obs = jax.vmap(env.obs)(env_state)
-        return Runner(params, tx.init(params), env_state, obs, key)
+        return Runner(params, tx.init(params), env_state, obs, key, Stats.zeros(env.obs_dim),
+                      jnp.zeros(cfg.num_envs), Stats.zeros((1,)), jnp.zeros((cfg.replay_size, 6)),
+                      jnp.int32(0), jnp.int32(0))
+
+    def normalize(runner, obs):
+        if not cfg.obs_norm:
+            return obs
+        return (obs - runner.obs_stats.mean) / jnp.sqrt(runner.obs_stats.var + 1e-8)
 
     def env_step(carry, _):
         runner, knobs = carry
         key, k_act, k_env = jax.random.split(runner.key, 3)
-        mean, log_std = actor(runner.params, runner.obs)
+        obs_n = normalize(runner, runner.obs)
+        mean, log_std = actor(runner.params, obs_n)
         action = mean + jnp.exp(log_std) * jax.random.normal(k_act, mean.shape)
         logp = gaussian_logp(action, mean, log_std)
-        value = critic(runner.params, runner.obs)
+        value = critic(runner.params, obs_n)
+        env_knobs = {**knobs, "replay_s": runner.replay_s, "replay_n": runner.replay_n}
         env_state, obs, reward, info = jax.vmap(env.step_autoreset, in_axes=(0, 0, 0, None))(
-            jax.random.split(k_env, cfg.num_envs), runner.env_state, action, knobs
+            jax.random.split(k_env, cfg.num_envs), runner.env_state, action, env_knobs
         )
+        info["raw_reward"] = reward
+        ret, ret_stats = runner.ret, runner.ret_stats
+        if cfg.reward_norm:
+            ret = ret * cfg.gamma + reward
+            ret_stats = ret_stats.update(ret[:, None])
+            reward = reward / jnp.sqrt(ret_stats.var[0] + 1e-8)
+            ret = jnp.where(info["done"], 0.0, ret)
         # Time-limit truncation is not a real ending: bootstrap with the value of the state we
         # were cut off in, folded into the reward, so GAE can treat every `done` the same way.
-        reward = reward + cfg.gamma * critic(runner.params, info["final_obs"]) * info["truncated"]
-        transition = Transition(runner.obs, action, logp, value, reward, info["done"], info)
-        runner = runner._replace(env_state=env_state, obs=obs, key=key)
+        final_value = critic(runner.params, normalize(runner, info["final_obs"]))
+        reward = reward + cfg.gamma * final_value * info["truncated"]
+        info["raw_obs"] = runner.obs
+        transition = Transition(obs_n, action, logp, value, reward, info["done"], info)
+        runner = runner._replace(env_state=env_state, obs=obs, key=key, ret=ret, ret_stats=ret_stats)
         return (runner, knobs), transition
+
+    def add_replay(runner, traj):
+        """Write up to 64 new hard states per update into the ring buffer."""
+        mask = traj.info["replay_candidate"].reshape(-1)
+        states = traj.info["replay_state"].reshape(-1, 6)
+        order = jnp.argsort(~mask)[:64]  # candidates first
+        valid = mask[order]
+        pos = (runner.replay_ptr + jnp.cumsum(valid) - 1) % cfg.replay_size
+        pos = jnp.where(valid, pos, cfg.replay_size)  # out of range -> dropped
+        replay_s = runner.replay_s.at[pos].set(states[order], mode="drop")
+        k = valid.sum()
+        return runner._replace(replay_s=replay_s, replay_ptr=(runner.replay_ptr + k) % cfg.replay_size,
+                               replay_n=jnp.minimum(runner.replay_n + k, cfg.replay_size))
 
     def compute_gae(traj: Transition, last_value):
         def step(carry, t: Transition):
@@ -142,7 +224,7 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
     def update(carry, _):
         runner, knobs = carry
         (runner, _), traj = jax.lax.scan(env_step, (runner, knobs), None, length=cfg.num_steps)
-        adv, target = compute_gae(traj, critic(runner.params, runner.obs))
+        adv, target = compute_gae(traj, critic(runner.params, normalize(runner, runner.obs)))
         data = (traj.obs, traj.action, traj.logp, traj.value, adv, target)
         data = jax.tree.map(lambda x: x.reshape((batch_size, *x.shape[2:])), data)
 
@@ -167,6 +249,9 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
             epoch, (runner.params, runner.opt_state, runner.key), None, length=cfg.update_epochs
         )
         runner = runner._replace(params=params, opt_state=opt_state, key=key)
+        if cfg.obs_norm:
+            runner = runner._replace(obs_stats=runner.obs_stats.update(traj.info["raw_obs"].reshape(-1, env.obs_dim)))
+        runner = add_replay(runner, traj)
 
         info = traj.info
         metrics = jax.tree.map(jnp.mean, aux)
@@ -184,6 +269,10 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
             # evaluator-style success of hanging starts (drives the curriculum)
             swingup_success=masked_mean(info["swingup_success"], info["swingup_episode"]),
             action_std=jnp.exp(params["log_std"]).mean(),
+            shield_rate=info["shielded"].mean(),  # fraction of steps the track shield overrode
+            reward_raw=info["raw_reward"].mean(),
+            return_std=jnp.sqrt(runner.ret_stats.var[0]),
+            replay_n=runner.replay_n,
         )
         return (runner, knobs), metrics
 
@@ -195,41 +284,68 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
     return jax.jit(init), train_chunk
 
 
+def export_runner(cfg: PPOConfig, runner: Runner):
+    """Policy + critic params on raw observations (what checkpoints store and evaluators use)."""
+    return export_params(runner.params, runner.obs_stats, cfg.obs_norm)
+
+
+EVAL_CASES = {
+    # name: (start mix, start noise, cart spread, push level)
+    "still": ((1.0, 0.0, 0.0), 0.0, 0.0, 0.0),        # hanging still, cart centred
+    "perturbed": ((1.0, 0.0, 0.0), 1.0, 0.0, 0.0),    # hanging, cart and links perturbed
+    "random": ((0.0, 1.0, 0.0), 0.0, 0.0, 0.0),       # any angles, +-3 rad/s
+    "edge": ((0.0, 1.0, 0.0), 0.0, 1.0, 0.0),         # random, cart up to +-2.5 m and +-1.5 m/s
+    "push": ((0.0, 0.0, 1.0), 0.0, 0.0, 0.2),         # near upright, tip pushes at level 0.2
+}
+
+
 def make_evaluator(env: DoublePendulumCart, num_episodes: int = 64):
-    """Checkpoint test: deterministic policy from hanging starts, no pushes.
+    """Checkpoint test: deterministic policy (the Gaussian mean), real physics, 20 s episodes,
+    num_episodes per case in EVAL_CASES. An episode succeeds if the cart never leaves the track
+    and the pendulum is upright >= 90% of the last 5 s.
 
     Returns evaluate(params, key) -> dict with
-        success       fraction of episodes upright >= 90% of the last 5 s, never off track
-        swingup_time  mean time to first reach upright (successful episodes) [s]
-        upright_last5 mean fraction of the last 5 s spent upright
+        success        success from hanging still (the headline number)
+        swingup_time   mean time to first reach upright from hanging still (successful episodes) [s]
+        upright_last5  mean fraction of the last 5 s spent upright, hanging still
+        success_<case> success per case, off_track_<case> off-track rate per case
+        score          mean success over all cases
     """
-    last = int(5.0 / env.dt)
+    last = env.steps(SUCCESS_WINDOW)
 
-    def episode(params, key):
-        state0 = env.reset(key, mix=(1.0, 0.0, 0.0))
+    def episode(params, key, case):
+        mix, noise, cart_spread, push = case
+        k_reset, k_push = jax.random.split(key)
+        state0 = env.reset(k_reset, mix=jnp.array(mix), noise=noise, cart_spread=cart_spread)
 
-        def step(carry, _):
+        def step(carry, k):
             state, off_track = carry
+            state = env.sample_push(k, state, push)
+            tip = (jnp.where(state.push_left > 0, state.push_force, 0.0), 0.0)
             mean, _ = actor(params, env.obs(state))
-            state, _, terminated, _ = env.step(state, mean)
+            state, _, terminated, _ = env.step(state, mean, tip_force=tip)
             off_track = off_track | terminated  # the episode is over once the cart leaves the track
             return (state, off_track), (env.is_upright(state.q) & ~off_track, off_track)
 
-        _, (upright, off_track) = jax.lax.scan(step, (state0, False), None, length=env.max_steps)
+        _, (upright, off_track) = jax.lax.scan(step, (state0, False), jax.random.split(k_push, env.max_steps))
         upright_last = upright[-last:].mean()
-        success = (upright_last >= 0.9) & ~off_track[-1]
+        success = (upright_last >= SUCCESS_FRACTION) & ~off_track[-1]
         first_up = jnp.where(upright.any(), jnp.argmax(upright) + 1, -1)
-        return success, first_up * env.dt, upright_last
+        return success, first_up * env.dt, upright_last, off_track[-1]
 
     @jax.jit
     def evaluate(params, key):
-        success, first_up, upright_last = jax.vmap(episode, in_axes=(None, 0))(
-            params, jax.random.split(key, num_episodes)
-        )
-        return {
-            "success": success.mean(),
-            "swingup_time": masked_mean(first_up, success),
-            "upright_last5": upright_last.mean(),
-        }
+        out = {}
+        for i, (name, case) in enumerate(EVAL_CASES.items()):
+            keys = jax.random.split(jax.random.fold_in(key, i), num_episodes)
+            success, first_up, upright_last, off = jax.vmap(lambda k: episode(params, k, case))(keys)
+            out[f"success_{name}"] = success.mean()
+            out[f"off_track_{name}"] = off.mean()
+            if name == "still":
+                out["success"] = success.mean()
+                out["swingup_time"] = masked_mean(first_up, success)
+                out["upright_last5"] = upright_last.mean()
+        out["score"] = jnp.mean(jnp.array([out[f"success_{n}"] for n in EVAL_CASES]))
+        return out
 
     return evaluate

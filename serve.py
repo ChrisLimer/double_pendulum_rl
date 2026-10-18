@@ -35,10 +35,9 @@ app = FastAPI()
 
 
 def available_runs() -> list[Path]:
-    """Training runs plus checkpoint-only runs imported into runs/imported/."""
-    found = [p for p in runs.RUNS_DIR.glob("*") if (p / "config.json").exists()]
-    found += [p for p in (runs.RUNS_DIR / "imported").glob("*") if (p / "config.json").exists()]
-    return sorted(found)
+    """Runs in runs/ and in group folders runs/<group>/ (runs/imported/ holds checkpoint-only
+    runs imported from experiments)."""
+    return runs.all_runs()
 
 
 def run_name(run: Path) -> str:
@@ -58,6 +57,34 @@ def current_run(name: str | None = None) -> Path:
     if run is None:
         raise HTTPException(404, "no runs yet; start training with `uv run train.py`")
     return run
+
+
+def group_of(run: Path) -> str | None:
+    return run.parent.name if run.parent.resolve() != runs.RUNS_DIR.resolve() else None
+
+
+@app.get("/api/leaderboard")
+def leaderboard(group: str | None = None, run: str | None = None):
+    """The runs of a group (default: the shown run's group), ranked by the evaluation score of
+    their latest checkpoint."""
+    if group is None:
+        group = group_of(current_run(run))
+    if group is None:
+        return {"group": None, "runs": []}
+    rows = []
+    for r in available_runs():
+        if group_of(r) != group:
+            continue
+        ckpts = runs.list_checkpoints(r)
+        if not ckpts:
+            continue
+        meta = checkpoint_meta(ckpts[-1], ckpts[-1].stat().st_mtime)
+        config, _, _ = run_config(r)
+        rows.append({"name": run_name(r), "label": config.get("label") or r.name, "checkpoint": ckpts[-1].stem,
+                     "env_steps": meta.get("env_steps"), "progress": meta.get("update", 0) / config["num_updates"],
+                     "eval": meta.get("eval", {})})
+    rows.sort(key=lambda row: -(row["eval"].get("score") or row["eval"].get("success") or 0))
+    return {"group": group, "runs": rows}
 
 
 @app.get("/api/runs")
@@ -131,18 +158,43 @@ def checkpoints(run: str | None = None):
     return {"run": run_name(run), "checkpoints": out}
 
 
+@functools.lru_cache(maxsize=256)
+def value_scale(path: Path, mtime: float) -> float:
+    """Factor from the critic's output to return units. Runs trained with reward_norm divide
+    rewards by the running std of the return; that std is stored in the checkpoint (newer runs)
+    or logged as return_std in metrics.jsonl at the checkpoint's update."""
+    meta = checkpoint_meta(path, mtime)
+    if meta.get("value_scale"):
+        return float(meta["value_scale"])
+    run = path.parent.parent
+    config, _, _ = run_config(run)
+    if not config["ppo"].get("reward_norm"):
+        return 1.0
+    update, scale = meta.get("update", 0), 1.0
+    with open(run / "metrics.jsonl") as f:
+        for line in f:
+            row = json.loads(line)
+            if row.get("return_std"):
+                scale = row["return_std"]
+            if row["update"] >= update:
+                break
+    return float(scale)
+
+
 @app.get("/api/policy")
 def policy(ckpt: str = "latest", run: str | None = None):
-    """Actor weights of a checkpoint as base64 float32 (row-major), plus the env config."""
+    """Actor and critic weights of a checkpoint as base64 float32 (row-major), the env config, and
+    value_scale (critic output x value_scale = predicted discounted return)."""
     run = current_run(run)
     path = checkpoint_path(run, ckpt)
     params, meta = checkpoint(path, path.stat().st_mtime)
     _, _, env = run_config(run)
     b64 = lambda a: base64.b64encode(np.asarray(a, dtype="<f4").tobytes()).decode()  # noqa: E731
-    layers = [{"shape": list(np.shape(layer["w"])), "w": b64(layer["w"]), "b": b64(layer["b"])}
-              for layer in params["actor"]]
+    pack = lambda net: [{"shape": list(np.shape(layer["w"])), "w": b64(layer["w"]), "b": b64(layer["b"])}  # noqa: E731
+                        for layer in params[net]]
     return {"run": run_name(run), "checkpoint": path.stem, "meta": meta, "env": env_for_browser(env),
-            "layers": layers}
+            "layers": pack("actor"), "critic": pack("critic"),
+            "value_scale": value_scale(path, path.stat().st_mtime)}
 
 
 @app.get("/api/parity")
@@ -162,10 +214,28 @@ def parity(ckpt: str = "latest", n: int = 64, seed: int = 0, run: str | None = N
     next_q, next_qd = jax.vmap(lambda q, qd, f, t: env.integrate(q, qd, f, (t[0], t[1])))(q, qd, force, tip)
     obs = jax.vmap(env.obs)(states._replace(qd=qd))
     mean, _ = actor(params, obs)
+    # Track shield on cart states near the ends, with random policy actions.
+    k5, k6 = jax.random.split(k4)
+    cart = jax.random.uniform(k5, (n, 2), minval=jnp.array([-env.x_limit, -6.0]), maxval=jnp.array([env.x_limit, 6.0]))
+    shield_q, shield_qd = q.at[:, 0].set(cart[:, 0]), qd.at[:, 0].set(cart[:, 1])
+    shield_a = jax.random.uniform(k6, (n,), minval=-1.0, maxval=1.0)
+    shielded, shield_active = jax.vmap(env.apply_shield)(shield_q, shield_qd, shield_a)
     out = dict(q=q, qd=qd, force=force, tip=tip, next_q=next_q, next_qd=next_qd, obs=obs,
                action=jnp.clip(mean[:, 0], -1, 1),
-               pend_energy=jax.vmap(env.pendulum_energy)(q, qd))
+               pend_energy=jax.vmap(env.pendulum_energy)(q, qd),
+               shield_q=shield_q, shield_qd=shield_qd, shield_a=shield_a,
+               shielded=shielded, shield_active=shield_active.astype(jnp.float32))
     return {"checkpoint": path.stem, **{k: np.asarray(v).tolist() for k, v in out.items()}}
+
+
+@app.middleware("http")
+async def no_stale_pages(request, call_next):
+    """Revalidate the page and its scripts on every load, so an edited app.js / sim.mjs is
+    picked up by a normal reload (the server answers 304 when nothing changed)."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 app.mount("/", StaticFiles(directory=ROOT / "static", html=True), name="static")

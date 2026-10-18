@@ -50,9 +50,12 @@ Per step, `r = task + track_bonus + energy_shaping`, as in `DoublePendulumCart.s
 broad   = (1 + cos th1)/2 · (1 + cos th2)/2           # 1 upright, 0 if a link hangs down
 sharp   = exp(−(th1² + th2²) / (2 · 0.25²))           # narrow bump around vertical
 upright = 0.5 · broad + 0.5 · sharp
-task    = max(0, upright − 0.05 (x/3)² − 0.01 a² − 0.01 · broad · (ω1² + ω2²))
+task    = max(0, upright − 0.05 (x/3)² − 0.5 · sharp · (x/3)² − 0.01 a² − 0.01 · broad · (ω1² + ω2²))
 ```
 
+The `0.5 · sharp · (x/3)²` term (`upright_centring`, added in phase A) pulls the cart back to
+the centre while balancing. With only the 0.05 penalty, the final round-3 policy balanced up to
+1.5 m off centre and then lacked the track to recover from a push.
 The broad term alone is very flat near the top (still 0.7 at 0.8 rad off), so wobbling was almost
 as good as balancing. The sharp half fixes that. The spin penalty is weighted by `broad`, so it acts
 near the top (settle instead of whirling through) and not during the swing-up.
@@ -63,6 +66,9 @@ no effect, and leaving the track cost nothing, so early policies drove the cart 
 ~60% of swing-ups. The bonus keeps a reason to stay centred in every state, and because it is
 positive it never makes termination attractive. It was one of the two changes that fixed the
 off-track problem; see [experiments.md](experiments.md).
+
+**Shield penalty**: `−0.3` for every step in which the track shield (below) overrode the action,
+so the policy learns not to rely on it.
 
 **Energy shaping** (`energy_shaping_reward()`): potential-based, `γ·Φ(s') − Φ(s)` with
 
@@ -99,11 +105,33 @@ is documented here.
 The checkpoint evaluator starts hanging still (`noise = 0`), the start the task is defined by.
 The curriculum sets `mix` and `noise` during training.
 
+## Track shield
+
+`apply_shield()` runs before every physics step, in training, evaluation and the browser
+simulator alike. If braking at `shield_decel = 9 m/s²` could not stop the cart `shield_margin =
+0.25 m` before the end of the track, it overrides the action with full force toward the centre.
+Full force on the cart alone would give 18.75 m/s²; half of that leaves room for the reaction of
+the swinging links. Far from the ends it never interferes. This is a "shield" in the sense of
+[Alshiekh et al. 2018](https://arxiv.org/abs/1708.08611): a fixed safety layer that sits after
+the learner and corrects only unsafe actions. The policy is trained with it in the loop.
+
+It is not a mathematical guarantee: a violent swing can still drag the cart out. The checkpoint
+evaluator reports the remaining off-track rate per test case.
+
+## Hard starts and replay
+
+- `reset(..., cart_spread)` widens the cart state of all starts from ±1 m / ±0.5 m/s up to
+  ±2.5 m / ±1.5 m/s, close to the ends. The curriculum ties it to the start-noise level.
+- During training, each environment keeps a 0.5 s ring buffer of its states. When the shield
+  starts braking, or the cart leaves the track, the state from 0.5 s earlier is a *hard state*.
+  The trainer collects these into a 1024-entry replay buffer, and the curriculum starts up to 20%
+  of the episodes from them: a simple form of prioritized level replay, aimed at the failures.
+
 ## Pushes
 
 `sample_push()`: with probability `dt / 2.5 s` per step, a horizontal push on the tip starts. It
 lasts 0.1–0.2 s and has a random sign, with force `level · 10 N · U(0.3, 1)`. The push level comes
-from the curriculum. The final run trained up to level ≈ 0.2.
+from the curriculum. The runs so far trained up to level ≈ 0.2.
 
 ## The JavaScript port
 

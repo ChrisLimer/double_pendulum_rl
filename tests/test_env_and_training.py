@@ -182,3 +182,53 @@ def test_training_chunk_eval_and_checkpoint_roundtrip(tmp_path, monkeypatch):
     params, meta = runs.load_checkpoint(runs.list_checkpoints(run)[-1], cfg2, env2)
     assert meta["update"] == 2 and env2 == env
     jax.tree.map(np.testing.assert_array_equal, params, runner.params)
+
+
+def test_shield_keeps_the_cart_on_the_track():
+    """Pushing full force toward the end from a fast start: the shield brakes in time."""
+    env = DoublePendulumCart()
+    state = env.reset(jax.random.key(0))._replace(q=jnp.array([1.0, 0.0, 0.0]), qd=jnp.array([4.0, 0.0, 0.0]))
+
+    def step(s, _):
+        s, _, term, _ = env.step(s, jnp.ones(1))
+        return s, (s.q[0], s.shielded, term)
+
+    _, (x, shielded, term) = jax.lax.scan(step, state, None, length=300)
+    assert not term.any() and x.max() < env.x_limit and shielded.any()
+    # Far from the ends it never interferes.
+    a, active = env.apply_shield(jnp.zeros(3), jnp.array([1.0, 0.0, 0.0]), 0.7)
+    assert not active and a == 0.7
+    # Without the shield the same start leaves the track.
+    free = DoublePendulumCart(shield=False)
+    _, (_, _, term) = jax.lax.scan(lambda s, _: (lambda r: (r[0], (r[0].q[0], r[0].shielded, r[2])))(free.step(s, jnp.ones(1))),
+                                   state, None, length=300)
+    assert term.any()
+
+
+def test_upright_centring():
+    env = DoublePendulumCart()
+    centred = env.reward(jnp.zeros(3), jnp.zeros(3), 0.0)
+    off = env.reward(jnp.array([1.5, 0.0, 0.0]), jnp.zeros(3), 0.0)
+    assert np.isclose(centred - off, (0.05 + env.upright_centring) * 0.25, atol=1e-6)
+
+
+def test_exported_params_fold_the_observation_normalization():
+    from dprl.networks import actor, critic, init_params
+    from dprl.ppo import Stats, export_params
+    params = init_params(jax.random.key(0), 8, 1, (16, 16))
+    stats = Stats(jnp.linspace(-1, 1, 8), jnp.linspace(0.5, 2.0, 8), jnp.float32(100))
+    obs = jax.random.normal(jax.random.key(1), (5, 8))
+    norm = (obs - stats.mean) / jnp.sqrt(stats.var + 1e-8)
+    folded = export_params(params, stats)
+    np.testing.assert_allclose(actor(folded, obs)[0], actor(params, norm)[0], rtol=1e-4, atol=1e-5)
+    np.testing.assert_allclose(critic(folded, obs), critic(params, norm), rtol=1e-4, atol=1e-5)
+
+
+def test_replay_starts_use_the_buffer():
+    env = DoublePendulumCart()
+    knobs = Curriculum().knobs(0.0)
+    hard = jnp.array([[2.0, 0.5, -0.5, 1.0, 2.0, -2.0]])
+    knobs.update(replay_s=hard, replay_n=jnp.int32(1), replay_prob=jnp.float32(1.0), episode_steps=jnp.int32(1))
+    state = env.reset(jax.random.key(0))
+    state, _, _, _ = env.step_autoreset(jax.random.key(1), state, jnp.zeros(1), knobs)  # episode ends, reset
+    assert state.start_replay and np.allclose(state.q, hard[0, :3]) and np.allclose(state.qd, hard[0, 3:])

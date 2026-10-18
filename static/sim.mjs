@@ -110,6 +110,19 @@ export function reset(mode = "mix") {
   return { q: [u(-1, 1), wrap(th[0]), wrap(th[1])], qd: [u(-0.5, 0.5), w[0], w[1]] };
 }
 
+// Track shield, as DoublePendulumCart.apply_shield: full force toward the centre when braking at
+// shield_decel could not stop the cart shield_margin before the end. Returns [action, active].
+// Runs trained before the shield existed have no env.shield and are simulated without it.
+export function shield(env, q, qd, a) {
+  if (env.shield !== true) return [a, false];
+  const x = q[0], v = qd[0];
+  const dir = Math.abs(v) > 0.01 ? Math.sign(v) : Math.sign(x);
+  const room = env.x_limit - dir * x;
+  const stopping = Math.max(dir * v, 0) ** 2 / (2 * env.shield_decel);
+  const active = stopping + env.shield_margin >= room && dir * a > -1;
+  return active ? [-dir, true] : [a, false];
+}
+
 // ---- policy -----------------------------------------------------------------
 
 function f32(b64) {
@@ -125,17 +138,34 @@ export function loadPolicy(layers) {
 }
 
 // Deterministic action: the mean of the Gaussian policy, clipped to [-1, 1].
-export function policyAction(policy, o) {
+// Forward pass of an MLP from loadPolicy() (tanh hidden layers, linear output).
+function mlp(layers, o) {
   let x = Float64Array.from(o);
-  policy.forEach((layer, n) => {
+  layers.forEach((layer, n) => {
     const { nIn, nOut, w, b } = layer;
     const y = Float64Array.from(b);
     for (let i = 0; i < nIn; i++) {
       const xi = x[i], row = i * nOut;
       for (let j = 0; j < nOut; j++) y[j] += xi * w[row + j];
     }
-    if (n < policy.length - 1) for (let j = 0; j < nOut; j++) y[j] = Math.tanh(y[j]);
+    if (n < layers.length - 1) for (let j = 0; j < nOut; j++) y[j] = Math.tanh(y[j]);
     x = y;
   });
-  return Math.max(-1, Math.min(1, x[0]));
+  return x;
+}
+
+// Deterministic action: the Gaussian policy's mean, clipped to [-1, 1].
+export function policyAction(policy, o) {
+  return Math.max(-1, Math.min(1, mlp(policy, o)[0]));
+}
+
+// The critic's estimate (multiply by the checkpoint's value_scale for return units).
+export function value(critic, o) {
+  return mlp(critic, o)[0];
+}
+
+// Mirror image of a state: the system is symmetric under x -> -x, angles -> -angles (all
+// velocities negated); the matching action is -a.
+export function mirror(q, qd) {
+  return { q: q.map((v) => -v), qd: qd.map((v) => -v) };
 }

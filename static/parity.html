@@ -14,11 +14,12 @@
 </head>
 <body>
   <h1>Python ↔ JavaScript parity</h1>
-  <p class="muted">One control step from random states with random cart and tip forces, plus the policy's
-    action, computed by dprl/env.py (JAX, float32) and static/sim.mjs (float64). Run this after changing either.</p>
+  <p class="muted">One control step from random states with random cart and tip forces, the policy's
+    action and the track shield's decision, computed by dprl/env.py (JAX, float32) and static/sim.mjs (float64).
+    Run this after changing either.</p>
   <div id="out">running…</div>
   <script type="module">
-    import { integrate, obs, policyAction, loadPolicy, pendulumEnergy, wrap } from "./sim.mjs";
+    import { integrate, obs, policyAction, loadPolicy, pendulumEnergy, shield, wrap } from "./sim.mjs";
 
     const run = new URLSearchParams(location.search).get("run");
     const runParam = (sep) => (run ? `${sep}run=${encodeURIComponent(run)}` : "");
@@ -27,7 +28,7 @@
       fetch("/api/policy" + runParam("?")).then((r) => r.json()),
     ]);
     const env = pol.env, policy = loadPolicy(pol.layers);
-    const worst = { next_q: 0, next_qd: 0, obs: 0, action: 0, pend_energy: 0 };
+    const worst = { next_q: 0, next_qd: 0, obs: 0, action: 0, pend_energy: 0, shield: 0 };
     // Relative error, with angles compared modulo 2*pi.
     const err = (a, b, angle = false) => Math.abs(angle ? wrap(a - b) : a - b) / (1 + Math.abs(b));
     for (let n = 0; n < ref.q.length; n++) {
@@ -40,6 +41,8 @@
       o.forEach((v, i) => (worst.obs = Math.max(worst.obs, err(v, ref.obs[n][i]))));
       worst.action = Math.max(worst.action, err(policyAction(policy, o), ref.action[n]));
       worst.pend_energy = Math.max(worst.pend_energy, err(pendulumEnergy(env, ref.q[n], ref.qd[n]), ref.pend_energy[n]));
+      const [a, active] = shield(env, ref.shield_q[n], ref.shield_qd[n], ref.shield_a[n]);
+      worst.shield = Math.max(worst.shield, err(a, ref.shielded[n]), Number(active) !== ref.shield_active[n] ? 1 : 0);
     }
     const TOL = 1e-3;  // float32 vs float64 differences are ~1e-6; real bugs are >> 1e-3
     const pass = Object.values(worst).every((v) => v < TOL);

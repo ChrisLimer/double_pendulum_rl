@@ -30,6 +30,8 @@ SETTLE_TIME_UP, SETTLE_TIME_DOWN = 1.0, 5.0
 SUCCESS_WINDOW, SUCCESS_FRACTION = 5.0, 0.9
 # Default initial-state mixture: (hanging still, fully random, near upright).
 DEFAULT_START_MIX = (0.5, 0.0, 0.5)
+# Replay starts: states this long before the shield fired or the cart left the track.
+REPLAY_LOOKBACK = 0.5
 
 
 class EnvState(NamedTuple):
@@ -45,6 +47,9 @@ class EnvState(NamedTuple):
     start_down: jax.Array   # did the episode start with the lower link below horizontal?
     start_upright: jax.Array  # was it a near-upright start (not hanging or fully random)?
     up_in_window: jax.Array   # upright steps within the last SUCCESS_WINDOW of the episode
+    shielded: jax.Array     # did the track shield override the action in the last step?
+    start_replay: jax.Array  # did the episode start from a replayed hard state?
+    hist: jax.Array         # (H, 6) ring buffer of recent (q, qd), H = REPLAY_LOOKBACK / dt
 
 
 def wrap(angle):
@@ -72,6 +77,19 @@ class DoublePendulumCart:
     # keeps a reason to stay centred (and on the track) in every state. It is positive, so it
     # never makes ending the episode attractive.
     track_bonus: float = 0.1
+    # Centring while balancing: - upright_centring * sharp * (x / x_limit)^2 inside the task reward,
+    # with sharp the narrow upright bump (so it only acts near the top). The 0.05 cart-position
+    # penalty alone let the policy balance 1.5 m off centre, leaving no room to recover from a push.
+    upright_centring: float = 0.5
+    # Track shield: overrides the action with full force toward the centre when the cart could
+    # not stop before the end of the track by braking at shield_decel (a conservative fraction of
+    # max_force / total mass, because the swinging links push back on the cart) plus shield_margin.
+    # The policy is trained with the shield in the loop and pays shield_penalty per overridden step,
+    # so it learns not to need it. static/sim.mjs implements the same shield.
+    shield: bool = True
+    shield_decel: float = 9.0     # [m/s^2]; max_force / total mass = 18.75
+    shield_margin: float = 0.25   # [m]
+    shield_penalty: float = 0.3
     # Random pushes on the tip (scaled by the curriculum's push level in [0, 1]).
     push_max_force: float = 10.0
     push_interval: float = 2.5    # mean seconds between pushes
@@ -180,12 +198,14 @@ class DoublePendulumCart:
     def steps(self, seconds: float) -> int:
         return round(seconds / self.dt)
 
-    def reset(self, key, mix=DEFAULT_START_MIX, spread=1.0, noise=0.0) -> EnvState:
+    def reset(self, key, mix=DEFAULT_START_MIX, spread=1.0, noise=0.0, cart_spread=0.0) -> EnvState:
         """Sample a start from a mixture of (hanging, fully random, near upright).
         Hanging: at noise = 0 the cart is centred and at rest and the links hang still within
         0.02 rad of straight down; noise in [0, 1] widens this up to cart within 1 m and 0.5 m/s,
         links within 0.3 rad and 0.5 rad/s.
-        Near upright: cart within 1 m, up to 0.4 * spread rad and spread rad/s."""
+        Near upright: cart within 1 m, up to 0.4 * spread rad and spread rad/s.
+        cart_spread in [0, 1] widens the cart state of all starts (hanging scaled by noise) from
+        +-1 m and +-0.5 m/s up to +-2.5 m and +-1.5 m/s: hard starts close to the ends."""
         k_mode, k_x, k_th, k_w = jax.random.split(key, 4)
         mode = jax.random.choice(k_mode, 3, p=jnp.array(mix))
         u = lambda k, lo, hi: jax.random.uniform(k, (2,), minval=lo, maxval=hi)  # noqa: E731
@@ -197,13 +217,20 @@ class DoublePendulumCart:
             u(ks[2], -0.4 * spread, 0.4 * spread),
         )
         w = jnp.select([mode == 0, mode == 1], [u(kw[0], -0.5, 0.5) * noise, u(kw[1], -3.0, 3.0)], u(kw[2], -spread, spread))
-        x, xd = jax.random.uniform(k_x, (2,), minval=jnp.array([-1.0, -0.5]), maxval=jnp.array([1.0, 0.5]))
+        x, xd = jax.random.uniform(k_x, (2,), minval=-1.0, maxval=1.0)
+        x, xd = x * (1.0 + 1.5 * cart_spread), xd * (0.5 + 1.0 * cart_spread)
         x, xd = jnp.where(mode == 0, noise * x, x), jnp.where(mode == 0, noise * xd, xd)
         q = jnp.array([x, *wrap(th)])
         qd = jnp.array([xd, *w])
         i0, f0 = jnp.int32(0), jnp.float32(0.0)
+        return self.make_state(q, qd, mode == 2)
+
+    def make_state(self, q, qd, start_upright=False, start_replay=False) -> EnvState:
+        i0, f0 = jnp.int32(0), jnp.float32(0.0)
+        hist = jnp.tile(jnp.concatenate([q, qd]), (self.steps(REPLAY_LOOKBACK), 1))
         return EnvState(q, qd, i0, f0, i0, f0, jnp.int32(10**6), jnp.bool_(False), jnp.int32(-1),
-                        jnp.cos(q[1]) < 0, mode == 2, i0)
+                        jnp.cos(q[1]) < 0, jnp.asarray(start_upright, bool), i0, jnp.bool_(False),
+                        jnp.asarray(start_replay, bool), hist)
 
     def obs(self, state: EnvState):
         x, th1, th2 = state.q
@@ -228,6 +255,7 @@ class DoublePendulumCart:
         upright = 0.5 * broad + 0.5 * sharp
         r = (upright
              - 0.05 * (x / self.x_limit) ** 2
+             - self.upright_centring * sharp * (x / self.x_limit) ** 2
              - 0.01 * a**2
              - 0.01 * broad * (w1**2 + w2**2))  # near the top: settle, don't whirl through
         # Kept >= 0 so that ending the episode early (leaving the track) is never attractive.
@@ -252,20 +280,33 @@ class DoublePendulumCart:
         phi_next = jnp.where(terminated, 0.0, scale * self.energy_closeness(q, qd, gravity_scale))
         return self.shaping_gamma * phi_next - phi
 
+    def apply_shield(self, q, qd, a):
+        """Track shield (see shield): returns (action, overridden?)."""
+        x, v = q[0], qd[0]
+        direction = jnp.where(jnp.abs(v) > 0.01, jnp.sign(v), jnp.sign(x))  # toward this end
+        room = self.x_limit - direction * x
+        stopping = jnp.maximum(direction * v, 0.0) ** 2 / (2 * self.shield_decel)
+        active = self.shield & (stopping + self.shield_margin >= room) & (direction * a > -1.0)
+        return jnp.where(active, -direction, a), active
+
     def step(self, state: EnvState, action, energy_weight=0.0, tip_force=(0.0, 0.0), max_steps=None,
              gravity_scale=1.0, damping=0.0):
         """One control step. Returns (new_state, reward, terminated, truncated)."""
         a = jnp.clip(action[0], -1.0, 1.0)
-        q, qd = self.integrate(state.q, state.qd, a * self.max_force, tip_force, gravity_scale, damping)
+        applied, shielded = self.apply_shield(state.q, state.qd, a)
+        q, qd = self.integrate(state.q, state.qd, applied * self.max_force, tip_force, gravity_scale, damping)
         terminated = jnp.abs(q[0]) > self.x_limit
         reward = (self.reward(q, qd, a)
                   + self.energy_shaping_reward(state, q, qd, terminated, energy_weight, gravity_scale)
                   + self.track_reward(q, terminated)
+                  - self.shield_penalty * shielded
                   - self.off_track_penalty * terminated)
         t = state.t + 1
         truncated = t >= (self.max_steps if max_steps is None else max_steps)
         first_up = jnp.where((state.first_up < 0) & self.is_upright(q), t, state.first_up)
-        new = state._replace(q=q, qd=qd, t=t, ep_return=state.ep_return + reward, first_up=first_up)
+        hist = state.hist.at[state.t % state.hist.shape[0]].set(jnp.concatenate([state.q, state.qd]))
+        new = state._replace(q=q, qd=qd, t=t, ep_return=state.ep_return + reward, first_up=first_up,
+                             shielded=shielded, hist=hist)
         return new, reward, terminated, truncated
 
     def sample_push(self, key, state: EnvState, push_level):
@@ -286,8 +327,9 @@ class DoublePendulumCart:
         """Training step: random pushes, then step, then reset finished episodes in place.
 
         knobs holds the curriculum settings (traced, so they can change without recompiling):
-        energy_weight, push_level, start_mix (3 probabilities), start_spread, start_noise, episode_steps,
-        gravity_scale and damping.
+        energy_weight, push_level, start_mix (3 probabilities), start_spread, start_noise,
+        cart_spread, episode_steps, gravity_scale, damping, and replay starts: replay_prob and a
+        buffer replay_s (B, 6) of (q, qd) with replay_n valid entries.
         Returns (state, obs, reward, info). info["final_obs"] is the observation before the
         reset, so the trainer can bootstrap the value of time-limit truncations.
         """
@@ -315,13 +357,26 @@ class DoublePendulumCart:
             # 2-3 s after a push that hit an upright pendulum: is it upright again?
             "recovery_window": next_state.push_while_up & (next_state.since_push >= self.steps(2.0))
                                & (next_state.since_push < self.steps(3.0)),
-            "swingup_episode": done & next_state.start_down,
+            "swingup_episode": done & next_state.start_down & ~next_state.start_replay,
+            "shielded": next_state.shielded,
+            # hard state for the replay buffer: REPLAY_LOOKBACK before the shield first fires in a
+            # stretch, or before the cart leaves the track (hist[t % H] is the oldest entry)
+            "replay_candidate": ((next_state.shielded & ~state.shielded) | terminated)
+                                & (next_state.t > next_state.hist.shape[0]),
+            "replay_state": next_state.hist[next_state.t % next_state.hist.shape[0]],
             "swingup_time": next_state.first_up * self.dt,
             "reached_top": next_state.first_up >= 0,
             # same test as the evaluator: on the track and upright >= 90% of the last 5 s
             "swingup_success": truncated & ~terminated
                                & (next_state.up_in_window >= SUCCESS_FRACTION * self.steps(SUCCESS_WINDOW)),
         }
-        reset_state = self.reset(k_reset, knobs["start_mix"], knobs["start_spread"], knobs["start_noise"])
+        k_reset, k_replay, k_pick = jax.random.split(k_reset, 3)
+        reset_state = self.reset(k_reset, knobs["start_mix"], knobs["start_spread"], knobs["start_noise"],
+                                 knobs.get("cart_spread", 0.0))
+        replay_s, replay_n = knobs.get("replay_s", jnp.zeros((1, 6))), knobs.get("replay_n", 0)
+        pick = replay_s[jax.random.randint(k_pick, (), 0, jnp.maximum(replay_n, 1))]
+        replayed = self.make_state(pick[:3], pick[3:], start_replay=True)
+        use_replay = (replay_n > 0) & (jax.random.uniform(k_replay) < knobs.get("replay_prob", 0.0))
+        reset_state = jax.tree.map(lambda r, n: jnp.where(use_replay, r, n), replayed, reset_state)
         state = jax.tree.map(lambda r, n: jnp.where(done, r, n), reset_state, next_state)
         return state, self.obs(state), reward, info

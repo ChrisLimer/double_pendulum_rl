@@ -6,23 +6,24 @@ and arbitrary starting states. Training runs on a laptop CPU, and a browser dash
 the training curves live and simulates any checkpoint in real time, so you can push the
 pendulum with the mouse.
 
-![Final run: swing-up success and curriculum over 200M steps](docs/img/final_run_training.png)
+![Round-3 run: swing-up success and curriculum over 200M steps](docs/img/final_run_training.png)
 
-## Results (final run, 200M steps, ~70 min on an Apple-silicon CPU)
+## Results (current defaults, 2 seeds × 120M steps, ~3 h each with 8 runs sharing a laptop CPU)
 
-Deterministic policy, real physics, 256 test episodes per case:
+Deterministic policy, real physics, 256 test episodes per case and seed:
 
-| Start / test | Success | Time to upright and settled |
-|---|---|---|
-| Hanging still (cart centred) | **100%** | 1.62 s, a single clean swing, no second try |
-| Hanging, perturbed (cart ±1 m, links ±0.3 rad, swinging) | **100%** | 1.6 s (90th percentile 1.7 s) |
-| Fully random angles and velocities | 91% | ~2.1 s |
-| Near upright | 99% | – |
-| Random tip pushes every ~2.5 s, level 0.1 / 0.2 (0.3–1 N / 0.6–2 N for 0.1–0.2 s) | 98% / 72% | – |
+| Start / test | Success | Off-track | Notes |
+|---|---|---|---|
+| Hanging still (cart centred) | **100%** | 0% | upright and settled at 1.65 s, a single clean swing |
+| Hanging, perturbed (cart ±1 m, links ±0.3 rad, swinging) | **100%** | 0% | |
+| Fully random angles and velocities | **100%** | ≤ 0.8% | 90% settled within 3.2 s (2.4 s with the mirror rule) |
+| Random, cart near the ends (±2.5 m, ±1.5 m/s) | **100%** | 0% | |
+| Tip pushes every ~2.5 s, level 0.1 / 0.2 / 0.3 | 100% / 75% / 33% | 0% | strong pushes knock it over, but it stays on the track |
 
 Success means: on the track for the whole 20 s episode and upright (both links within 0.3 rad)
-for at least 90% of its last 5 s. How we got there, including what did not work, is in
-[docs/experiments.md](docs/experiments.md).
+for at least 90% of its last 5 s. A track shield brakes the cart if it could not otherwise stop
+before the end. Before it existed, up to 30% of the pushed episodes left the track. How we got
+here, including what did not work, is in [docs/experiments.md](docs/experiments.md).
 
 ## Quick start
 
@@ -49,16 +50,19 @@ uv run pytest                                    # tests (physics, rewards, curr
   RK4 at 100 Hz control (2 substeps of 5 ms), 30 N max force, track of ±3 m (leaving it ends the
   episode). Pure functions, so the environment is `jit`/`vmap`-ed together with the policy.
 - **Reward**: upright term (half broad cosine, half sharp Gaussian), small cart-position, action and
-  spin penalties, a centring *track bonus*, and potential-based *energy shaping* that fades out.
+  spin penalties, centring while upright, a *track bonus*, and potential-based *energy shaping* that
+  fades out. A *track shield* overrides the action when the cart could not stop before the end.
 - **PPO** ([dprl/ppo.py](dprl/ppo.py)): PureJaxRL style, the rollout and the update are one jitted
-  function; 64 envs × 128 steps per update, 3×256 tanh MLPs, γ = 0.9975.
+  function; 64 envs × 128 steps per update, 3×256 tanh MLPs, γ = 0.9975, reward scaling, entropy 0.005.
 - **Curriculum** ([dprl/curriculum.py](dprl/curriculum.py)), driven by the swing-up success of the
   hanging starts: easier physics (half gravity plus link drag) fades to real physics, then the
-  share of near-upright starts drops from 50% to 10%, then starts get perturbed and random, and
-  finally random pushes get stronger.
+  share of near-upright starts drops from 50% to 10%, then starts get perturbed, random, close to
+  the ends of the track and replayed from past near-failures, and finally random pushes get stronger.
 - **Dashboard** ([serve.py](serve.py), [static/](static/)): a small FastAPI server that only reads run
   folders; the page runs physics and policy in the browser ([static/sim.mjs](static/sim.mjs), a JS port
-  checked against the Python code by `parity.html`).
+  checked against the Python code by `parity.html`). It shows the critic's predicted value, can
+  pick the swing direction by mirror symmetry, and ranks runs of a `--group` on a leaderboard with
+  the best four simulated side by side.
 
 ## Documentation
 

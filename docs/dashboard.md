@@ -13,7 +13,7 @@ without touching training.
 ## What the page shows
 
 - **Header:** the run, a progress bar with steps and throughput, and the **show** picker, which
-  switches to any run in `runs/` (or `?run=<name>` in the URL). Runs in `runs/imported/` are
+  switches to any run in `runs/` or `runs/<group>/` (or `?run=<name>` in the URL). Runs in `runs/imported/` are
   experiment results with final weights only (see
   [experiments/README.md](../experiments/README.md)); they have no training curves.
 - **Charts:** each metric from `metrics.jsonl` (see [training.md](training.md)), raw and smoothed,
@@ -26,6 +26,24 @@ without touching training.
     slider.
   - **Space** starts a new episode, and **Endless** removes the 20 s limit.
   - **checkpoint test** shows the checkpoint's evaluator result.
+  - **predicted value** shows the critic's estimate of the discounted return (γ = 0.9975, ~4 s
+    horizon) for the current state and for its mirror image, in reward units. Runs trained with
+    reward scaling are converted back with the scale logged at that checkpoint. Balancing
+    upright is worth about 400.
+  - **Symmetry:** the system is symmetric under x → −x, angles → −angles (velocities negated),
+    force → −force, but a policy can learn a preferred swing direction.
+    - "Auto" acts with whichever of s and mirror(s) the critic values higher. When acting
+      mirrored, the action is −π(mirror(s)).
+    - It switches only when the other side is ≥ 2% better and the current side has been used
+      for ≥ 0.25 s.
+    - "Always mirrored" shows the opposite tendency.
+    - On random starts "auto" raised the baseline's success from 88% to 95% (see
+      [experiments.md](experiments.md)).
+
+- **Top runs** (only for runs in a `--group`): a leaderboard of the group ranked by the latest
+  checkpoint's score, and the best four simulated side by side from the same start with
+  deterministic actions, for a direct comparison. The cart turns orange while the track shield
+  brakes.
 
 ## How the simulation works
 
@@ -43,10 +61,11 @@ changing either side. At 100 Hz with the 3-layer policy the maximum relative err
 | Endpoint | Returns |
 |---|---|
 | `/api/runs` | available runs and the default one |
+| `/api/leaderboard?group=&run=` | the runs of a group ranked by their latest checkpoint's score |
 | `/api/status?run=` | config, number of checkpoints |
 | `/api/metrics?since=&run=` | metric rows from index `since` |
 | `/api/checkpoints?run=` | checkpoint names + metadata |
-| `/api/policy?ckpt=&run=` | actor weights + env config |
+| `/api/policy?ckpt=&run=` | actor and critic weights, env config, `value_scale` (critic output → return units) |
 | `/api/parity?n=&seed=&run=` | reference values for the parity page |
 
 `run` is optional. It is matched against the list of existing runs, so a query can't read

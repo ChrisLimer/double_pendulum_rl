@@ -38,6 +38,15 @@
     a { color: var(--accent); }
     kbd { border: 1px solid var(--border); border-radius: 4px; padding: 0 0.3rem; font: 12px ui-monospace, monospace; }
     input[type=range] { vertical-align: middle; }
+    .wide { grid-column: 1 / -1; }
+    h2 { font-size: 0.95rem; margin: 0 0 0.25rem; }
+    #top-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.75rem; margin: 0.5rem 0; }
+    .top-sim canvas { display: block; width: 100%; aspect-ratio: 16 / 9; background: var(--bg); border-radius: 6px; }
+    #top-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+    #top-table th, #top-table td { text-align: left; padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--border); }
+    #top-table th { color: var(--muted); font-weight: normal; }
+    #top-table tr.current td { color: var(--accent); }
+    @media (max-width: 700px) { #top-table { font-size: 12px; } #top-table th, #top-table td { padding: 0.2rem; } }
   </style>
 </head>
 <body>
@@ -74,20 +83,53 @@
           <span id="push-strength-value" class="num">10 N</span></label>
         <label><input id="endless" type="checkbox"> Endless (no 20 s limit)</label>
       </div>
+      <div class="controls">
+        <label title="Evaluate the critic on the state and its mirror image and act with the side that predicts more return">Symmetry
+          <select id="symmetry">
+            <option value="off" selected>Off (policy as trained)</option>
+            <option value="auto">Auto: pick the side with the higher value</option>
+            <option value="mirror">Always mirrored</option>
+          </select>
+        </label>
+      </div>
       <div id="sim-info" class="num">
         <span class="muted">policy</span><span id="info-ckpt">–</span>
         <span class="muted">checkpoint test</span><span id="info-eval">–</span>
         <span class="muted">time</span><span id="info-time">–</span>
         <span class="muted">upright</span><span id="info-upright">–</span>
         <span class="muted">status</span><span id="info-status">–</span>
+        <span class="muted" title="Critic estimate of the discounted return (gamma 0.9975, ~4 s horizon), in reward units">predicted value</span><span id="info-value">–</span>
+        <span class="muted">symmetry</span><span id="info-side">–</span>
       </div>
       <p class="muted small"><a id="parity-link" href="parity.html">Python ↔ JS physics check</a></p>
     </section>
 
     <section id="charts"></section>
+
+    <section id="top-section" class="panel wide" hidden>
+      <h2>Top runs in <span id="top-group">–</span></h2>
+      <p class="muted small">Ranked by the latest checkpoint's score (mean success over the five test cases,
+        64 episodes each; "edge" = random start with the cart up to ±2.5 m and ±1.5 m/s, "push" = tip pushes at level 0.2).
+        The best four run side by side from the same start with deterministic actions (the policy mean);
+        the cart turns orange while the track shield brakes.</p>
+      <div class="controls">
+        <label>Start
+          <select id="top-start">
+            <option value="random" selected>Fully random</option>
+            <option value="still">Hanging still</option>
+            <option value="hanging">Hanging, perturbed</option>
+            <option value="upright">Near upright</option>
+          </select>
+        </label>
+        <button id="top-restart">Same new start for all</button>
+      </div>
+      <div id="top-grid"></div>
+      <table id="top-table" class="num"></table>
+    </section>
   </main>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
   <script type="module" src="app.js"></script>
+  <script type="module" src="top.mjs"></script>
 </body>
 </html>

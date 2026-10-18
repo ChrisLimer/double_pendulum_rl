@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "experiments"))
 from dprl.env import DoublePendulumCart
 from dprl.curriculum import Curriculum
-from dprl.ppo import PPOConfig, make_trainer, make_evaluator
+from dprl.ppo import PPOConfig, export_runner, make_trainer, make_evaluator
 from dprl.networks import actor
 name, seed, steps = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 ov = json.loads(sys.argv[4]) if len(sys.argv) > 4 else {}
@@ -43,14 +43,15 @@ while upd < cfg.num_updates:
     cur.update(ul)
     if upd % 2000 == 0:
         hist.append((upd * cfg.steps_per_update, round(ul, 2), round(cur.upright_share, 2), round(cur.push_level, 2), round(cur.ease, 2), round(float(m["action_std"][-1]), 3)))
-ev = {k: float(v) for k, v in jax.device_get(evaluate(runner.params, jax.random.key(123))).items()}
+params = export_runner(cfg, runner)  # plain MLP on raw observations
+ev = {k: float(v) for k, v in jax.device_get(evaluate(params, jax.random.key(123))).items()}
 # off-track before top from hanging starts
 envd = DoublePendulumCart()
 def ep(key):
     s0 = envd.reset(key, mix=(1., 0., 0.))
     def step(c, _):
         s, off, up = c
-        a, _ = actor(runner.params, envd.obs(s)); s2, _, term, _ = envd.step(s, a)
+        a, _ = actor(params, envd.obs(s)); s2, _, term, _ = envd.step(s, a)
         up = up | (envd.is_upright(s2.q) & ~off)
         offb = off | term
         return (s2, offb, up), (term & ~off & ~up)
@@ -60,9 +61,9 @@ off, up, ob = jax.jit(jax.vmap(ep))(jax.random.split(jax.random.key(7), 128))
 ev.update(off=float(off.mean()), reach=float(up.mean()), off_before_top=float(ob.mean()),
           minutes=(time.time() - t0) / 60, final_cur=(cur.upright_share, cur.push_level, cur.ease), hist=hist[-4:])
 (OUT / "params").mkdir(parents=True, exist_ok=True)
-pickle.dump(jax.device_get(runner.params), open(OUT / "params" / f"{name}_{seed}.pkl", "wb"))
+pickle.dump(jax.device_get(params), open(OUT / "params" / f"{name}_{seed}.pkl", "wb"))
 from robust_eval import make_robust  # noqa: E402
-ev["robust"] = make_robust(DoublePendulumCart())(runner.params)
+ev["robust"] = make_robust(DoublePendulumCart())(params)
 print(name, seed, json.dumps(ev))
 with open(OUT / "results.jsonl", "a") as f:
     f.write(json.dumps({"name": name, "seed": seed, "steps": steps, "ov": ov, **ev}) + "\n")

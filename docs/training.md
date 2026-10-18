@@ -18,7 +18,9 @@ curriculum is updated and checkpoints are written.
 | learning rate | 3e-4, linear decay to 0 | Adam, eps 1e-5 |
 | networks | actor and critic MLPs, 3 × 256, tanh | 2 layers never learned the swing-up at 100 Hz |
 | policy | Gaussian, state-independent log std (init −0.5) | the evaluator uses the mean |
-| entropy bonus | 0 | |
+| entropy bonus | 0.005 | keeps the policy std from collapsing before the swing-up is found |
+| observation normalization | off (optional `obs_norm`) | running mean/std, folded into the first layer when saving; 2 of 4 seeds got stuck with it |
+| reward scaling | ÷ running std of the discounted return | values O(1) instead of hundreds; the 0.2 value clipping had made the critic very slow |
 | total | 200M env steps | ~70 min at ~50k steps/s on one Apple-silicon CPU |
 
 - **Truncation:** at the time limit the value of the state the episode was cut off in is
@@ -40,9 +42,11 @@ While the success rate stays above 0.9, the curriculum moves one stage forward a
    0.1 N·m·s/rad, so motions are slower and easier to catch. The `ease` level goes from 1 to 0.
 1. **Fewer near-upright starts.** Their share goes from 50% down to 10% (the floor keeps balancing
    practised), so more episodes practise the swing-up.
-2. **Start noise 0 → 1.** Hanging starts get perturbed (cart off centre and moving, links swinging),
-   and up to 30% of the non-upright starts become fully random. This keeps the policy from
-   overfitting to the single hanging-still trajectory.
+2. **Start noise 0 → 1.** Hanging starts get perturbed (cart off centre and moving, links
+   swinging), and up to 30% of the non-upright starts become fully random. The cart state of all
+   starts widens toward the ends of the track, and up to 20% of the episodes start from replayed
+   hard states (see [environment.md](environment.md)). This keeps the policy from overfitting to
+   the single hanging-still trajectory.
 3. **Push level 0 → 1.** Random pushes on the tip get stronger.
 
 Below 0.8 it goes back: pushes first, then start noise, then more near-upright starts, then
@@ -52,8 +56,18 @@ Separately, the energy-shaping weight `w_E` decays on a fixed schedule (1 → 0.
 training).
 
 [docs/img/final_run_training.png](img/final_run_training.png) shows how the stages played out in
-the final run. Physics was real by ~35M steps, near-upright starts were at the floor by ~38M and
+the round-3 final run. Physics was real by ~35M steps, near-upright starts were at the floor by ~38M and
 start noise at its maximum by ~70M; pushes then crept up to ~0.2.
+
+## Command line
+
+```bash
+uv run train.py --group NAME --label LABEL --seed 3 --env shield=false --ppo obs_norm=false --cur replay_share=0
+```
+
+`--env` / `--ppo` / `--cur KEY=VALUE` override fields of `DoublePendulumCart` / `PPOConfig` /
+`Curriculum` (values parsed as JSON). `--group` puts the run in `runs/<group>/`, where the
+dashboard ranks it against the others.
 
 ## Run folders
 
@@ -70,8 +84,19 @@ runs/<timestamp>/
 ```
 
 `runs/` is not under version control. A checkpoint is saved every 200 updates (~1.6M steps) and
-evaluated on 64 hanging-still episodes. That evaluation, `make_evaluator`, uses the deterministic
-policy and real physics, and computes success, time to the top and upright fraction in the last 5 s.
+evaluated by `make_evaluator`: deterministic policy (the Gaussian mean), real physics, 64 episodes
+in each of five cases.
+
+| Case | Start |
+|---|---|
+| `still` | hanging still, cart centred (the headline `success`) |
+| `perturbed` | hanging, cart and links perturbed |
+| `random` | any angles, ±3 rad/s |
+| `edge` | random, with the cart up to ±2.5 m and ±1.5 m/s |
+| `push` | near upright, tip pushes at level 0.2 |
+
+The evaluation stores the success and off-track rate per case, and `score` = mean success.
+`--group` runs are ranked on that score in the dashboard.
 
 ## Metrics worth watching
 
@@ -83,6 +108,8 @@ policy and real physics, and computes success, time to the top and upright fract
 | `upright_late_up` | the same, near-upright starts only (balancing) |
 | `recovery` | upright 2–3 s after a push that hit an upright pendulum |
 | `action_std` | policy std; it collapsing early (≈0.005) meant the 2-layer policy had stopped exploring |
+| `shield_rate` | fraction of steps in which the track shield overrode the action |
+| `replay_n` | hard states in the replay buffer |
 
 ## Evaluating a checkpoint
 

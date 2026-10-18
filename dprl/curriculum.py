@@ -14,8 +14,11 @@
     1. then the near-upright share shrinks toward min_upright_share, so more episodes
        practise the swing-up;
     2. then start noise rises to 1: hanging starts get perturbed (cart off centre and moving,
-       links off vertical and swinging) and up to random_share of the non-upright starts are
-       fully random, so the policy does not overfit to the one hanging-still trajectory;
+       links off vertical and swinging), up to random_share of the non-upright starts are
+       fully random, the cart state of all starts widens toward the ends of the track
+       (cart_spread), and up to replay_share of the episodes start from replayed hard states
+       (recorded shortly before the track shield fired or the cart left the track), so the
+       policy does not overfit to the one hanging-still trajectory;
     3. once that is at the maximum, random pushes on the tip get stronger.
   While success < lower_below it goes back the other way: pushes, start noise, more
   near-upright starts (up to max_upright_share), then easier physics.
@@ -43,6 +46,8 @@ class Curriculum:
     gravity_relief: float = 0.5      # gravity scale at ease = 1 is 1 - gravity_relief
     damping: float = 0.1             # link drag [N m s/rad] at ease = 1
     random_share: float = 0.3        # of the non-upright starts, at start noise 1
+    replay_share: float = 0.2        # episodes starting from replayed hard states, at start noise 1
+    wide_starts: bool = True         # widen the cart state of the starts with start noise
     noise_stage: bool = True         # stage 2 on/off
     upright_share: float = 0.5
     start_noise: float = 0.0
@@ -66,6 +71,8 @@ class Curriculum:
             "start_mix": jnp.array(self.start_mix(), dtype=jnp.float32),
             "start_spread": jnp.float32(1.0),
             "start_noise": jnp.float32(self.start_noise),
+            "cart_spread": jnp.float32(self.start_noise if self.wide_starts else 0.0),
+            "replay_prob": jnp.float32(self.replay_share * self.start_noise),
             "episode_steps": jnp.int32(self.episode_steps),
             "gravity_scale": jnp.float32(1.0 - self.gravity_relief * self.ease),
             "damping": jnp.float32(self.damping * self.ease),

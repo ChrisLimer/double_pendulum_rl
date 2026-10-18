@@ -1,7 +1,8 @@
 # Experiments and analysis
 
 This is the history of how the policy got from "balances, but drives off the track when swinging
-up" to "swings up in 1.6 s every time, from still or perturbed hanging starts". It includes what
+up" to "swings up in ~1.6 s every time, recovers from random states, and does not leave the
+track". It includes what
 did not work. The raw results are in [experiments/results/](../experiments/results/), and the
 scripts are described in [experiments/README.md](../experiments/README.md).
 
@@ -157,11 +158,11 @@ The figure above evaluates every saved policy on the same 256 fresh episodes per
 | + easier physics (4 seeds, 60M) | 100% | 61% | 48% | 95% | 45% |
 | + start noise (4 seeds, 120M) | **100%** | **100%** | **96%** | **99%** | **72%** |
 | population, best member (80M) | 100% | 100% | 99% | 100% | 68% |
-| **final run** (defaults, 200M) | **100%** | **100%** | 91% | 98% | 72% |
+| **round-3 final run** (200M) | **100%** | **100%** | 91% | 98% | 72% |
 
-## The final run
+## The round-3 final run
 
-`uv run train.py` with the defaults (easier physics + start noise, 3 × 256, 100 Hz, 200M steps,
+`uv run train.py` with the round-3 defaults (easier physics + start noise, 3 × 256, 100 Hz, 200M steps,
 ~70 min). Its curve is at the top of the [README](../README.md):
 
 - Checkpoint success reached 100% at ~25M steps and stayed there from ~55M.
@@ -176,6 +177,81 @@ The final checkpoint:
 - **Random starts:** 91%, settled at ~2.1 s. **Near upright:** 99%.
 - **Pushes:** level 0.1 98%, level 0.2 72%, level 0.3 32%. The curriculum had only reached
   level ≈ 0.2.
+
+## Round 4: never leave the track ("phase A")
+
+**What the failures looked like.** The round-3 policy only failed on random starts and pushes,
+and it did so by leaving the track. Rollouts of the failures showed two patterns:
+
+- Failing episodes reached a peak cart speed of ~5.7 m/s, against ~3.9 m/s in successful ones,
+  but their peak energy was no higher.
+- Under pushes, the policy was often balancing 1–1.7 m off centre when the push came. The
+  recovery manoeuvre then needed more track than was left.
+
+So the problem was not the energy "panicking" upward, but catches and recoveries that ignore the
+ends of the track.
+
+**Changes** (in [env.py](../dprl/env.py), [ppo.py](../dprl/ppo.py), [curriculum.py](../dprl/curriculum.py)):
+
+1. **Track shield.** A braking override whenever the cart could not stop 0.25 m before the end at
+   9 m/s². The policy trains with it in the loop and pays 0.3 per overridden step. This is
+   shielding as in [Alshiekh et al. 2018](https://arxiv.org/abs/1708.08611); Recovery RL, the
+   learned version of the same idea, was the alternative.
+2. **Centring while balancing.** `−0.5 · sharp · (x/3)²`, acting only near the top.
+3. **Normalization.** Rewards are scaled by the running return std. Observations were standardized
+   too, and that was later dropped (see below).
+4. **Hard starts.** The cart state of the starts widens up to ±2.5 m / ±1.5 m/s. Up to 20% of the
+   episodes start from a replay buffer of states recorded 0.5 s before the shield fired or the
+   cart left the track.
+5. **A richer checkpoint test** with five cases, and a leaderboard on the dashboard.
+
+**Runs** (120M steps each, group `phaseA`):
+
+- **4 baseline seeds:** the round-3 defaults, with all of the above off.
+- **4 seeds with all of it on:** two of these (seeds 1 and 2) never got going. Their policy std
+  collapsed to ~0.02–0.04 while the physics was still eased, and at 33M steps they could not
+  even balance, so I stopped them.
+- **`Afix`:** phase A without the observation normalization and with an entropy bonus of 0.005,
+  restarted on the same two seeds.
+
+Two things seemed to drive the collapse:
+
+- With reward scaling the critic fits far better (value loss ~0.002 vs ~40 without it), so the
+  policy gradient consistently shrinks the std.
+- Observation normalization amplified the barely varying cart inputs in those seeds.
+
+**Results:** every final checkpoint on the same 256 fresh episodes per case
+([experiments/compare_runs.py](../experiments/compare_runs.py), data in
+[results/compare_phaseA.json](../experiments/results/compare_phaseA.json)). The table shows mean
+success, and the worst off-track rate over the seeds in brackets.
+
+| | still | perturbed | random | edge | push 0.1 | push 0.2 | push 0.3 | settle, random p90 |
+|---|---|---|---|---|---|---|---|---|
+| baseline (4 seeds) | 100% | 100% | 93% (9%) | 89% (13%) | 99% | 76% (14%) | 33% (**30%**) | 4.8 s |
+| phase A with obs. norm. (2 surviving of 4) | 100% | 100% | 99% (1%) | 98% (1%) | 99% | 58% (0%) | 23% (0%) | 6.8 s |
+| **`Afix` (2 seeds)** | **100%** | **100%** | **100%** (1%) | **100%** (0%) | **100%** | 75% (**0%**) | 33% (**0%**) | **3.2 s** |
+
+- **Leaving the track is essentially solved.** In the `Afix` runs it happens in at most 0.8% of
+  any case, and never in seed 1. The baseline left the track in up to 30% of the episodes under
+  pushes.
+- **Strong pushes still knock it over.** Level 0.3 is a push of 0.9–3 N for 0.1–0.2 s every
+  ~2.5 s. But it now falls *safely*, without leaving the track, and swings back up.
+- The swing-up from hanging still takes 1.65 s, against 1.76 s for the baseline.
+
+**Mirror symmetry.** The dynamics are symmetric (x, angles and velocities negated, force negated),
+but the critic often rated a state and its mirror image very differently during swing-ups (e.g.
+192 vs 332): the policies learn a preferred swing direction. The dashboard's "auto" rule acts with
+the side the critic values higher (−π(mirror(s)) when mirrored), with a little hysteresis. With the
+same episodes:
+
+| random starts | success off → auto | settle p90 off → auto |
+|---|---|---|
+| baseline | 93% → 98% | 4.8 s → 2.9 s |
+| phase A with obs. norm. | 99% → 100% | 6.8 s → 4.8 s |
+| `Afix` | 100% → 100% | 3.2 s → 2.4 s |
+
+That this helps means the learned bias costs performance. Building the symmetry into training
+would remove it rather than correct it afterwards; see the next steps below.
 
 ## Lessons
 
@@ -193,12 +269,24 @@ The final checkpoint:
 6. **Easing the physics** (lower gravity, link drag) made learning more reliable and the swing-up
    faster.
 7. **Use 3+ seeds.** Several single-seed conclusions in round 1 reversed with more seeds or
-   longer training.
+   longer training. In round 4, 2 of 4 seeds of a configuration failed outright.
+8. **A safety layer in the training loop beats penalties.** A large off-track penalty made
+   round-1 policies timid (0% success). A shield that simply prevents the failure, plus a small
+   penalty for needing it, removed track exits without hurting the swing-up.
+9. **A better critic can hurt exploration.** Reward scaling made learning faster, but without an
+   entropy bonus the policy std could collapse before the swing-up was found.
 
 ## Open issues and next steps
 
-- **Pushes.** Recovery is good up to level 0.1 and partial at 0.2. Longer training lets the push
-  stage continue; a slower push ramp or a separate recovery signal might work better.
+- **Symmetry in training.** Mirror data augmentation (add every transition mirrored), or a policy
+  that is equivariant by construction (π(mirror s) = −π(s), V(mirror s) = V(s)).
+- **Pushes.** Recovery is good up to level 0.1 and partial at 0.2 (75%); level 0.3 still knocks
+  it over, now safely. Longer training lets the push stage continue; a slower push ramp or a
+  separate recovery signal might work better.
+- **A learned switch to a "calm-down" controller** (Recovery RL style). This is a second policy
+  output that hands control to an energy-dissipating, braking controller in states the critic
+  rates as risky. The shield now covers the track limit, so this would mainly target the strong
+  pushes.
 - **A trajectory-optimization teacher.** An iLQR swing-up with track and force limits, used for
   behaviour-cloning pretraining plus a decaying regularizer on the policy's own states (DAgger
   style), as in guided policy search.

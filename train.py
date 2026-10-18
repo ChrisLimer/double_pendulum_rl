@@ -2,6 +2,11 @@
 
     uv run train.py                       # train + dashboard at http://127.0.0.1:8000
     uv run train.py --total-steps 5e6 --no-server
+    uv run train.py --group shield-test --label s1 --seed 1 --env shield=false --cur replay_share=0
+
+--env / --ppo / --cur KEY=VALUE override fields of DoublePendulumCart / PPOConfig / Curriculum
+(VALUE is parsed as JSON, so true, 0.5 and [256,256] work). Runs in a --group are ranked
+on the dashboard's leaderboard.
 
 The dashboard runs as a separate process (serve.py) and reads the run folder, so it never
 slows down or blocks training. It keeps running after training ends; Ctrl+C stops both.
@@ -23,7 +28,7 @@ import numpy as np
 
 from dprl.env import DoublePendulumCart
 from dprl.curriculum import Curriculum
-from dprl.ppo import PPOConfig, make_evaluator, make_trainer
+from dprl.ppo import PPOConfig, export_runner, make_evaluator, make_trainer
 from dprl.runs import new_run, save_checkpoint
 
 ROOT = Path(__file__).resolve().parent
@@ -45,6 +50,19 @@ def start_dashboard(port: int):
     return proc
 
 
+def overrides(pairs):
+    out = {}
+    for pair in pairs or []:
+        key, _, value = pair.partition("=")
+        try:
+            out[key] = json.loads(value)
+        except json.JSONDecodeError:
+            out[key] = value
+        if isinstance(out[key], list):
+            out[key] = tuple(out[key])
+    return out
+
+
 def to_json(value):
     value = float(value)
     return value if math.isfinite(value) else None
@@ -60,12 +78,19 @@ def main():
                    help="how the energy reward is added (see DoublePendulumCart)")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--no-server", action="store_true", help="don't launch the dashboard")
+    p.add_argument("--group", help="put the run in runs/<group>/ (ranked together on the dashboard)")
+    p.add_argument("--label", help="short name for the run, appended to its folder name")
+    p.add_argument("--env", action="append", metavar="KEY=VALUE", help="DoublePendulumCart override")
+    p.add_argument("--ppo", action="append", metavar="KEY=VALUE", help="PPOConfig override")
+    p.add_argument("--cur", action="append", metavar="KEY=VALUE", help="Curriculum override")
     args = p.parse_args()
 
-    cfg = PPOConfig(seed=args.seed, total_timesteps=int(args.total_steps), num_envs=args.num_envs)
-    env = DoublePendulumCart(shaping_gamma=cfg.gamma, energy_shaping=args.energy_shaping)
-    curriculum = Curriculum()
-    run = new_run(cfg, env, curriculum)
+    cfg = PPOConfig(**{"seed": args.seed, "total_timesteps": int(args.total_steps), "num_envs": args.num_envs,
+                       **overrides(args.ppo)})
+    env = DoublePendulumCart(**{"shaping_gamma": cfg.gamma, "energy_shaping": args.energy_shaping,
+                                **overrides(args.env)})
+    curriculum = Curriculum(**overrides(args.cur))
+    run = new_run(cfg, env, curriculum, group=args.group, label=args.label)
     print(f"Run folder: {run.relative_to(ROOT)}  ({cfg.num_updates} updates, "
           f"{cfg.steps_per_update} env steps each, JAX backend: {jax.default_backend()})")
 
@@ -76,14 +101,17 @@ def main():
     eval_key = jax.random.key(cfg.seed + 1)  # same test episodes for every checkpoint
 
     def checkpoint(update, row):
-        results = {k: to_json(v) for k, v in jax.device_get(evaluate(runner.params, eval_key)).items()}
-        save_checkpoint(run, runner.params, {
+        params = export_runner(cfg, runner)  # plain MLP on raw observations
+        results = {k: to_json(v) for k, v in jax.device_get(evaluate(params, eval_key)).items()}
+        save_checkpoint(run, params, {
             "update": update, "env_steps": update * cfg.steps_per_update, "time": time.time(),
             "eval": results,
             "push_level": curriculum.push_level,
             "upright_share": curriculum.upright_share,
             "start_noise": curriculum.start_noise,
             "ease": curriculum.ease,
+            # critic output x value_scale = predicted discounted return (rewards are scaled in training)
+            "value_scale": float(np.sqrt(runner.ret_stats.var[0])) if cfg.reward_norm else 1.0,
             "upright_late": row and row["upright_late"],
         })
         return results
@@ -118,10 +146,13 @@ def main():
                 if update - last_ckpt >= args.ckpt_every or update >= cfg.num_updates:
                     ev = checkpoint(update, row)
                     last_ckpt = update
-                    msg = f"  | ckpt eval: swing-up success {ev['success']:.0%}"
+                    msg = (f"  | ckpt: still {ev['success']:.0%} perturbed {ev['success_perturbed']:.0%} "
+                           f"random {ev['success_random']:.0%} edge {ev['success_edge']:.0%} "
+                           f"push {ev['success_push']:.0%} (score {ev['score']:.2f})")
                 print(f"update {update:5d}/{cfg.num_updates}  steps {update * cfg.steps_per_update:>11,}  "
                       f"upright(late) {upright_late:5.2f}  swing-up success {success:4.2f}  upright share {curriculum.upright_share:.2f}  noise {curriculum.start_noise:.2f}  "
-                      f"push {curriculum.push_level:.2f}  w_E {float(knobs['energy_weight']):.2f}  {sps:,.0f} steps/s{msg}", flush=True)
+                      f"push {curriculum.push_level:.2f}  shield {np.mean(metrics['shield_rate']):.3f}  "
+                      f"w_E {float(knobs['energy_weight']):.2f}  {sps:,.0f} steps/s{msg}", flush=True)
 
         print(f"Training finished in {time.time() - t_start:.0f} s.")
         if server:
