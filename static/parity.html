@@ -27,7 +27,7 @@
       fetch("/api/parity?n=200" + runParam("&")).then((r) => r.json()),
       fetch("/api/policy" + runParam("?")).then((r) => r.json()),
     ]);
-    const env = pol.env, policy = loadPolicy(pol.layers);
+    const env = pol.env, policy = loadPolicy(pol.layers, pol.symmetric);
     const worst = { next_q: 0, next_qd: 0, obs: 0, action: 0, pend_energy: 0, shield: 0 };
     // Relative error, with angles compared modulo 2*pi.
     const err = (a, b, angle = false) => Math.abs(angle ? wrap(a - b) : a - b) / (1 + Math.abs(b));

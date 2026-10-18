@@ -133,8 +133,10 @@ function f32(b64) {
 }
 
 // From the /api/policy response: [{shape: [n_in, n_out], w, b}] with base64 float32.
-export function loadPolicy(layers) {
-  return layers.map((l) => ({ nIn: l.shape[0], nOut: l.shape[1], w: f32(l.w), b: f32(l.b) }));
+export function loadPolicy(layers, symmetric = false) {
+  const net = layers.map((l) => ({ nIn: l.shape[0], nOut: l.shape[1], w: f32(l.w), b: f32(l.b) }));
+  net.symmetric = symmetric;
+  return net;
 }
 
 // Deterministic action: the mean of the Gaussian policy, clipped to [-1, 1].
@@ -154,14 +156,56 @@ function mlp(layers, o) {
   return x;
 }
 
+// Mirror symmetry, as dprl/networks.py: an observation's mirror image negates everything but the
+// cosines; symmetric networks average over a state and its mirror, plus a small tie-break push
+// near the hanging-still fixed point (where an exactly symmetric policy would output 0).
+const MIRROR = [-1, -1, 1, -1, 1, -1, -1, -1];
+const TIE_BREAK_FORCE = 0.3, TIE_BREAK_WIDTH = 0.05;
+const mirrorObs = (o) => o.map((v, i) => v * MIRROR[i]);
+
+function tieBreak(o) {
+  const d2 = [0, 1, 3, 5, 6, 7].reduce((acc, i) => acc + o[i] * o[i], 0);
+  return TIE_BREAK_FORCE * Math.exp(-d2 / TIE_BREAK_WIDTH ** 2) * Math.min(Math.max(-o[2], 0), 1);
+}
+
+// loadPolicy(layers, symmetric) marks the network; the functions below apply the symmetry.
+function actorMean(policy, o) {
+  const m = mlp(policy, o)[0];
+  return policy.symmetric ? (m - mlp(policy, mirrorObs(o))[0]) / 2 + tieBreak(o) : m;
+}
+
+export function criticOutputs(critic, o) {
+  const out = mlp(critic, o);
+  if (!critic.symmetric) return out;
+  const mirrored = mlp(critic, mirrorObs(o));
+  return out.map((v, i) => (v + mirrored[i]) / 2);
+}
+
 // Deterministic action: the Gaussian policy's mean, clipped to [-1, 1].
 export function policyAction(policy, o) {
-  return Math.max(-1, Math.min(1, mlp(policy, o)[0]));
+  return Math.max(-1, Math.min(1, actorMean(policy, o)));
 }
 
 // The critic's estimate (multiply by the checkpoint's value_scale for return units).
 export function value(critic, o) {
-  return mlp(critic, o)[0];
+  return criticOutputs(critic, o)[0];
+}
+
+// Predicted time to stable upright [s] and its spread, from critic heads 1 and 2
+// (T / time_max and E[T^2] / time_max^2), or null for networks without them.
+export function timeToStable(critic, o, timeMax) {
+  if (!timeMax) return null;
+  const out = criticOutputs(critic, o);
+  if (out.length < 3) return null;
+  const mean = Math.min(Math.max(out[1] * timeMax, 0), timeMax);
+  const second = Math.max(out[2] * timeMax * timeMax, mean * mean);
+  return { mean, std: Math.sqrt(second - mean * mean) };
+}
+
+// The test the time prediction is trained for (env.stable_obs).
+export function isStable(o) {
+  const c = Math.cos(0.2);
+  return o[2] > c && o[4] > c && Math.abs(o[6]) * 10 < 1.5 && Math.abs(o[7]) * 10 < 1.5 && Math.abs(o[5]) * 3 < 1.0;
 }
 
 // Mirror image of a state: the system is symmetric under x -> -x, angles -> -angles (all

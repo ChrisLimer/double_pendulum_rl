@@ -186,8 +186,9 @@ const live = {
 async function getPolicy(name) {
   if (!policies.has(name)) {
     const d = await getJSON(`/api/policy?ckpt=${encodeURIComponent(name)}`);
-    policies.set(d.checkpoint, { policy: sim.loadPolicy(d.layers), env: d.env, meta: d.meta,
-                                 critic: d.critic ? sim.loadPolicy(d.critic) : null, valueScale: d.value_scale ?? 1 });
+    policies.set(d.checkpoint, { policy: sim.loadPolicy(d.layers, d.symmetric), env: d.env, meta: d.meta,
+                                 critic: d.critic ? sim.loadPolicy(d.critic, d.symmetric) : null,
+                                 valueScale: d.value_scale ?? 1, timeMax: d.time_max, symmetric: d.symmetric });
   }
   return { name, ...policies.get(name) };
 }
@@ -206,7 +207,7 @@ async function startEpisode() {
     const p = await getPolicy(name);
     if (token !== live.token) return;
     Object.assign(live, { env: p.env, policy: p.policy, ckpt: p.name, meta: p.meta, critic: p.critic,
-                          valueScale: p.valueScale });
+                          valueScale: p.valueScale, timeMax: p.timeMax, symmetric: p.symmetric });
     resetEpisode();
   } catch (e) {
     if (token !== live.token) return;
@@ -220,7 +221,7 @@ async function startEpisode() {
 function resetEpisode() {
   const s = sim.reset($("start-mode").value);
   Object.assign(live, { q: s.q, qd: s.qd, prevQ: s.q, t: 0, uprightTime: 0, acc: 0, ended: null, trail: [],
-                        side: 0, sideSince: 0, flips: 0 });
+                        side: 0, sideSince: 0, flips: 0, predAtStart: null, stableAt: null });
 }
 
 // External force on the tip from the user: mouse spring while dragging, or arrow keys.
@@ -250,6 +251,10 @@ function chooseAction() {
   const o = sim.obs(env, live.q, live.qd);
   const m = sim.mirror(live.q, live.qd), om = sim.obs(env, m.q, m.qd);
   live.value = live.critic ? sim.value(live.critic, o) * live.valueScale : null;
+  live.stable = sim.isStable(o);
+  live.time = live.critic ? sim.timeToStable(live.critic, o, live.timeMax) : null;
+  if (live.time && live.predAtStart === null) live.predAtStart = live.time;
+  if (live.stable && live.stableAt === null) live.stableAt = live.t;
   live.valueMirror = live.critic ? sim.value(live.critic, om) * live.valueScale : null;
   if (mode === "off" || !live.critic) live.side = 1;
   else if (mode === "mirror") live.side = -1;
@@ -400,6 +405,25 @@ function arrow(ctx, [x0, y0], [x1, y1], color) {
   ctx.fill();
 }
 
+// Normal approximation of the predicted time to stable upright: the chance that the actual
+// time is within +-CONFIDENCE_SPAN of the prediction.
+const CONFIDENCE_SPAN = 0.5;
+function erf(x) {  // Abramowitz & Stegun 7.1.26, |error| < 1.5e-7
+  const t = 1 / (1 + 0.3275911 * Math.abs(x));
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+  return Math.sign(x) * y;
+}
+
+function stableText() {
+  if (!live.time) return "– (this checkpoint has no time prediction)";
+  const reached = live.stableAt === null ? "" : ` · first stable at ${live.stableAt.toFixed(2)} s` +
+    (live.predAtStart ? ` (predicted ${live.predAtStart.mean.toFixed(2)} s at the start)` : "");
+  if (live.stable) return `stable now${reached}`;
+  const { mean, std } = live.time;
+  const p = std > 1e-3 ? erf(CONFIDENCE_SPAN / (std * Math.SQRT2)) : 1;
+  return `in ${mean.toFixed(2)} s ± ${std.toFixed(2)} s · ${Math.round(100 * p)}% chance within ±${CONFIDENCE_SPAN} s${reached}`;
+}
+
 function updateInfo() {
   const m = live.meta;
   $("info-ckpt").textContent = `${live.ckpt} (update ${m.update}, ${fmtSteps(m.env_steps)} env steps)`;
@@ -415,7 +439,9 @@ function updateInfo() {
   const v = (x) => (x == null ? "–" : x.toFixed(1));
   $("info-value").textContent = live.value == null ? "–"
     : `V(s) ${v(live.value)} · V(mirror) ${v(live.valueMirror)}`;
-  $("info-side").textContent = $("symmetry").value === "off" ? "off"
+  $("info-stable").textContent = stableText();
+  $("info-side").textContent = live.symmetric ? "built into the network (mirror-symmetric policy)"
+    : $("symmetry").value === "off" ? "off"
     : `acting ${live.side === -1 ? "mirrored" : "as is"} · ${live.flips} switch${live.flips === 1 ? "" : "es"}`;
   const up = sim.isUpright(live.q);
   $("info-status").textContent = live.ended !== null ? `${live.endReason} · loading next…`

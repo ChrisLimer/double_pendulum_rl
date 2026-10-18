@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 
 from dprl import runs
 from dprl.networks import actor
+from dprl.ppo import TIME_MAX
 
 ROOT = Path(__file__).resolve().parent
 pinned_run: Path | None = None
@@ -194,7 +195,9 @@ def policy(ckpt: str = "latest", run: str | None = None):
                         for layer in params[net]]
     return {"run": run_name(run), "checkpoint": path.stem, "meta": meta, "env": env_for_browser(env),
             "layers": pack("actor"), "critic": pack("critic"),
-            "value_scale": value_scale(path, path.stat().st_mtime)}
+            "value_scale": value_scale(path, path.stat().st_mtime),
+            # mirror-symmetric networks (see dprl/networks.py) and the time-to-stable heads
+            "symmetric": "sym" in params, "time_max": TIME_MAX if np.shape(params["critic"][-1]["b"])[0] >= 3 else None}
 
 
 @app.get("/api/parity")

@@ -51,6 +51,8 @@ def latest_run() -> Path | None:
 def load_config(run: Path):
     config = json.loads((run / "config.json").read_text())
     ppo = config["ppo"]
+    # Fields added later default to the behaviour of the code that wrote older runs.
+    ppo = {"symmetric": False, "time_head": False, **ppo}
     cfg = PPOConfig(**{**ppo, "hidden": tuple(ppo["hidden"])})
     # Ignore env fields from older versions of the code so old runs still open.
     fields = DoublePendulumCart.__dataclass_fields__
@@ -74,7 +76,8 @@ def list_checkpoints(run: Path) -> list[Path]:
 
 def load_checkpoint(path: Path, cfg: PPOConfig, env: DoublePendulumCart):
     """Rebuild the params pytree from a template network, filling leaves by name."""
-    template = init_params(jax.random.key(0), env.obs_dim, env.act_dim, cfg.hidden)
+    template = init_params(jax.random.key(0), env.obs_dim, env.act_dim, cfg.hidden, cfg.symmetric,
+                           3 if cfg.time_head else 1)
     leaves, treedef = jax.tree_util.tree_flatten_with_path(template)
     with np.load(path) as data:
         params = jax.tree_util.tree_unflatten(treedef, [data[jax.tree_util.keystr(k)] for k, _ in leaves])

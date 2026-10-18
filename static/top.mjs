@@ -51,7 +51,7 @@ async function refresh() {
     box.className = "top-sim";
     box.innerHTML = `<canvas></canvas><div class="small num"><b>#${i + 1}</b> ${r.label} · ${r.checkpoint}<br><span class="muted"></span></div>`;
     grid.append(box);
-    return { row: r, env: policies[i].env, policy: sim.loadPolicy(policies[i].layers),
+    return { row: r, env: policies[i].env, policy: sim.loadPolicy(policies[i].layers, policies[i].symmetric),
              canvas: box.querySelector("canvas"), status: box.querySelector(".muted") };
   });
   restart();

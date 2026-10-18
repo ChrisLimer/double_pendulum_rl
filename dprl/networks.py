@@ -1,4 +1,20 @@
-"""Tiny actor-critic MLPs in plain JAX. Params are a nested dict of arrays (a pytree)."""
+"""Tiny actor-critic MLPs in plain JAX. Params are a nested dict of arrays (a pytree).
+
+Mirror symmetry (optional, params contain the marker leaf "sym"): the cart-pendulum is symmetric
+under s -> M(s) (x, angles and velocities negated) with a -> -a. A symmetric policy and critic are
+built by averaging the network over a state and its mirror image:
+
+    mean(s)  = (f(o) - f(M o)) / 2 + tie_break(o)   so mean(M s) = -mean(s) (away from the tie-break)
+    value(s) = (g(o) + g(M o)) / 2                  so value(M s) = value(s)
+
+An equivariant mean is exactly 0 in states that are their own mirror image (cart centred, links
+exactly vertical, nothing moving): neither direction is better there, so a deterministic policy
+would wait forever when hanging perfectly still. tie_break() adds a small push in a fixed
+direction only within ~0.05 (in observation units) of the hanging-still fixed point, which breaks
+the tie; everywhere else the policy is exactly symmetric. (At the upright fixed point a zero action
+is right, so no tie-break there.)
+
+The critic can have extra outputs (heads); value() is output 0, see ppo.py for the others."""
 
 import math
 
@@ -23,23 +39,58 @@ def mlp(layers, x):
     return x @ layers[-1]["w"] + layers[-1]["b"]
 
 
-def init_params(key, obs_dim, act_dim, hidden=(64, 64)):
+# Mirror of an observation (x, sin1, cos1, sin2, cos2, xd, w1, w2): cosines are unchanged.
+MIRROR = jnp.array([-1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -1.0, -1.0])
+TIE_BREAK_FORCE = 0.3   # action units (x max_force)
+TIE_BREAK_WIDTH = 0.05  # observation units
+
+
+def init_params(key, obs_dim, act_dim, hidden=(64, 64), symmetric=False, critic_heads=1):
     ka, kc = jax.random.split(key)
-    return {
+    params = {
         "actor": init_mlp(ka, [obs_dim, *hidden, act_dim], out_scale=0.01),
-        "critic": init_mlp(kc, [obs_dim, *hidden, 1], out_scale=1.0),
+        "critic": init_mlp(kc, [obs_dim, *hidden, critic_heads], out_scale=1.0),
         "log_std": jnp.full(act_dim, -0.5),  # state-independent Gaussian std
     }
+    if symmetric:
+        params["sym"] = jnp.zeros(())  # marker: the dict structure is static under jit
+    return params
+
+
+def tie_break(obs):
+    """A fixed push near the hanging-still fixed point of the mirror map (see module docstring)."""
+    asym = obs[..., [0, 1, 3, 5, 6, 7]]  # the components the mirror negates
+    near = jnp.exp(-jnp.sum(asym**2, axis=-1, keepdims=True) / TIE_BREAK_WIDTH**2)
+    hanging = jnp.clip(-obs[..., 2:3], 0.0, 1.0)  # lower link pointing down
+    return TIE_BREAK_FORCE * near * hanging
+
+
+def mlp_and_mirror(layers, obs):
+    """The network on obs and on its mirror image, in one batched pass (much cheaper than two)."""
+    out = mlp(layers, jnp.stack([obs, obs * MIRROR]))
+    return out[0], out[1]
 
 
 def actor(params, obs):
     """Gaussian policy: returns (mean, log_std). Works for single or batched obs."""
-    mean = mlp(params["actor"], obs)
+    if "sym" in params:
+        direct, mirrored = mlp_and_mirror(params["actor"], obs)
+        mean = (direct - mirrored) / 2 + tie_break(obs)
+    else:
+        mean = mlp(params["actor"], obs)
     return mean, jnp.broadcast_to(params["log_std"], mean.shape)
 
 
+def critic_outputs(params, obs):
+    """All critic heads, (..., n). Mirror-invariant when the params are symmetric."""
+    if "sym" in params:
+        direct, mirrored = mlp_and_mirror(params["critic"], obs)
+        return (direct + mirrored) / 2
+    return mlp(params["critic"], obs)
+
+
 def critic(params, obs):
-    return mlp(params["critic"], obs)[..., 0]
+    return critic_outputs(params, obs)[..., 0]
 
 
 def gaussian_logp(x, mean, log_std):

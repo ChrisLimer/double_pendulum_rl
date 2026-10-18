@@ -18,8 +18,14 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from .env import DoublePendulumCart, EnvState, SUCCESS_FRACTION, SUCCESS_WINDOW
-from .networks import actor, critic, gaussian_logp, init_params
+from .env import DoublePendulumCart, EnvState, SUCCESS_FRACTION, SUCCESS_WINDOW, stable_obs
+from .networks import actor, critic, critic_outputs, gaussian_logp, init_params
+
+# Time-to-stable prediction: the critic's heads 1 and 2 predict T / TIME_MAX and E[T^2] / TIME_MAX^2,
+# with T the time until the state is stable upright (env.stable_obs). Learned by TD like the value
+# (T(s) = 0 if stable, else dt + T(s')); leaving the track counts as TIME_MAX, and targets are
+# capped there. Mean and second moment give a spread, so the dashboard can show a confidence.
+TIME_MAX = 20.0
 
 
 @dataclass(frozen=True)
@@ -43,6 +49,9 @@ class PPOConfig:
                                   # the observations are already scaled by hand)
     reward_norm: bool = True      # divide rewards by the running std of the discounted return
     replay_size: int = 1024       # hard-state buffer for replay starts
+    symmetric: bool = True        # mirror-symmetric policy and critic (see networks.py)
+    time_head: bool = True        # critic heads predicting the time to stable upright
+    time_coef: float = 0.5        # weight of the time-prediction loss
 
     @property
     def steps_per_update(self):
@@ -121,6 +130,8 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
     knobs is the curriculum's dict of traced values (see Curriculum.knobs), so changing them
     between chunks does not recompile.
     """
+    assert not (cfg.symmetric and cfg.obs_norm), "the mirror acts on raw observations: use obs_norm=False"
+    heads = 3 if cfg.time_head else 1
     batch_size = cfg.steps_per_update
     minibatch_size = batch_size // cfg.num_minibatches
     schedule = optax.linear_schedule(
@@ -130,7 +141,7 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
 
     def init(key):
         k_params, k_env, key = jax.random.split(key, 3)
-        params = init_params(k_params, env.obs_dim, env.act_dim, cfg.hidden)
+        params = init_params(k_params, env.obs_dim, env.act_dim, cfg.hidden, cfg.symmetric, heads)
         env_state = jax.vmap(env.reset)(jax.random.split(k_env, cfg.num_envs))
         obs = jax.vmap(env.obs)(env_state)
         return Runner(params, tx.init(params), env_state, obs, key, Stats.zeros(env.obs_dim),
@@ -149,7 +160,8 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
         mean, log_std = actor(runner.params, obs_n)
         action = mean + jnp.exp(log_std) * jax.random.normal(k_act, mean.shape)
         logp = gaussian_logp(action, mean, log_std)
-        value = critic(runner.params, obs_n)
+        outputs = critic_outputs(runner.params, obs_n)
+        value = outputs[..., 0]
         env_knobs = {**knobs, "replay_s": runner.replay_s, "replay_n": runner.replay_n}
         env_state, obs, reward, info = jax.vmap(env.step_autoreset, in_axes=(0, 0, 0, None))(
             jax.random.split(k_env, cfg.num_envs), runner.env_state, action, env_knobs
@@ -163,9 +175,12 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
             ret = jnp.where(info["done"], 0.0, ret)
         # Time-limit truncation is not a real ending: bootstrap with the value of the state we
         # were cut off in, folded into the reward, so GAE can treat every `done` the same way.
-        final_value = critic(runner.params, normalize(runner, info["final_obs"]))
-        reward = reward + cfg.gamma * final_value * info["truncated"]
+        final_outputs = critic_outputs(runner.params, normalize(runner, info["final_obs"]))
+        reward = reward + cfg.gamma * final_outputs[..., 0] * info["truncated"]
         info["raw_obs"] = runner.obs
+        if cfg.time_head:
+            info["time_pred"] = outputs[..., 1:3]
+            info["final_time_pred"] = final_outputs[..., 1:3]
         transition = Transition(obs_n, action, logp, value, reward, info["done"], info)
         runner = runner._replace(env_state=env_state, obs=obs, key=key, ret=ret, ret_stats=ret_stats)
         return (runner, knobs), transition
@@ -194,8 +209,32 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
         _, adv = jax.lax.scan(step, (jnp.zeros_like(last_value), last_value), traj, reverse=True)
         return adv, adv + traj.value
 
+    def time_targets(traj: Transition, last_pred):
+        """TD(lambda) targets for (T, E[T^2]), scaled by TIME_MAX and TIME_MAX^2.
+        T(s) = 0 if s is stable upright, else dt + T(s'); leaving the track: T(s') = TIME_MAX;
+        time-limit truncation: bootstrap from the prediction for the final state."""
+        info, dt = traj.info, env.dt
+        pred = jnp.concatenate([info["time_pred"][1:], last_pred[None]], axis=0)  # for s_{t+1}
+        pred = jnp.where(info["truncated"][..., None], info["final_time_pred"], pred)
+        boot_t = jnp.where(info["terminated"], TIME_MAX, pred[..., 0] * TIME_MAX)
+        boot_s = jnp.where(info["terminated"], TIME_MAX**2, pred[..., 1] * TIME_MAX**2)
+        stable = stable_obs(info["raw_obs"])
+
+        def step(carry, x):
+            y_t, y_s = carry  # lambda-returns of s_{t+1}
+            b_t, b_s, done, stab = x
+            g_t = jnp.where(done, b_t, (1 - cfg.gae_lambda) * b_t + cfg.gae_lambda * y_t)
+            g_s = jnp.where(done, b_s, (1 - cfg.gae_lambda) * b_s + cfg.gae_lambda * y_s)
+            t = jnp.clip(jnp.where(stab, 0.0, dt + g_t), 0.0, TIME_MAX)
+            s2 = jnp.clip(jnp.where(stab, 0.0, dt**2 + 2 * dt * g_t + g_s), 0.0, TIME_MAX**2)
+            return (t, s2), (t, s2)
+
+        init = (last_pred[..., 0] * TIME_MAX, last_pred[..., 1] * TIME_MAX**2)
+        _, (y_t, y_s) = jax.lax.scan(step, init, (boot_t, boot_s, traj.done, stable), reverse=True)
+        return jnp.stack([y_t / TIME_MAX, y_s / TIME_MAX**2], axis=-1)
+
     def loss_fn(params, mb):
-        obs, action, old_logp, old_value, adv, target = mb
+        obs, action, old_logp, old_value, adv, target, time_target = mb
         mean, log_std = actor(params, obs)
         logp = gaussian_logp(action, mean, log_std)
         log_ratio = logp - old_logp
@@ -205,13 +244,16 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
             ratio * adv, jnp.clip(ratio, 1 - cfg.clip_eps, 1 + cfg.clip_eps) * adv
         ).mean()
 
-        value = critic(params, obs)
+        outputs = critic_outputs(params, obs)
+        value = outputs[..., 0]
         value_clipped = old_value + jnp.clip(value - old_value, -cfg.clip_eps, cfg.clip_eps)
         v_loss = 0.5 * jnp.maximum((value - target) ** 2, (value_clipped - target) ** 2).mean()
 
         entropy = jnp.sum(params["log_std"] + 0.5 * jnp.log(2 * jnp.pi * jnp.e))
-        loss = pg_loss + cfg.vf_coef * v_loss - cfg.ent_coef * entropy
+        time_loss = ((outputs[..., 1:3] - time_target) ** 2).sum(-1).mean() if cfg.time_head else 0.0
+        loss = pg_loss + cfg.vf_coef * v_loss - cfg.ent_coef * entropy + cfg.time_coef * time_loss
         aux = {
+            "time_loss": time_loss,
             "loss": loss,
             "pg_loss": pg_loss,
             "v_loss": v_loss,
@@ -224,8 +266,10 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
     def update(carry, _):
         runner, knobs = carry
         (runner, _), traj = jax.lax.scan(env_step, (runner, knobs), None, length=cfg.num_steps)
-        adv, target = compute_gae(traj, critic(runner.params, normalize(runner, runner.obs)))
-        data = (traj.obs, traj.action, traj.logp, traj.value, adv, target)
+        last = critic_outputs(runner.params, normalize(runner, runner.obs))
+        adv, target = compute_gae(traj, last[..., 0])
+        time_target = time_targets(traj, last[..., 1:3]) if cfg.time_head else jnp.zeros((*target.shape, 2))
+        data = (traj.obs, traj.action, traj.logp, traj.value, adv, target, time_target)
         data = jax.tree.map(lambda x: x.reshape((batch_size, *x.shape[2:])), data)
 
         def epoch(carry, _):
@@ -274,6 +318,8 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
             return_std=jnp.sqrt(runner.ret_stats.var[0]),
             replay_n=runner.replay_n,
         )
+        if cfg.time_head:
+            metrics["time_to_stable"] = (traj.info["time_pred"][..., 0] * TIME_MAX).mean()
         return (runner, knobs), metrics
 
     @jax.jit

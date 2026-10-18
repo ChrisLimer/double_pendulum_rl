@@ -32,6 +32,17 @@ SUCCESS_WINDOW, SUCCESS_FRACTION = 5.0, 0.9
 DEFAULT_START_MIX = (0.5, 0.0, 0.5)
 # Replay starts: states this long before the shield fired or the cart left the track.
 REPLAY_LOOKBACK = 0.5
+# "Stable upright" for the time-to-stable prediction: both links within STABLE_ANGLE of vertical,
+# both link rates below STABLE_RATE and the cart slower than STABLE_CART_SPEED.
+STABLE_ANGLE, STABLE_RATE, STABLE_CART_SPEED = 0.2, 1.5, 1.0
+
+
+def stable_obs(obs):
+    """Is the observed state stable upright? Works on raw observations (single or batched)."""
+    cos_limit = jnp.cos(STABLE_ANGLE)
+    return ((obs[..., 2] > cos_limit) & (obs[..., 4] > cos_limit)
+            & (jnp.abs(obs[..., 6]) * 10.0 < STABLE_RATE) & (jnp.abs(obs[..., 7]) * 10.0 < STABLE_RATE)
+            & (jnp.abs(obs[..., 5]) * 3.0 < STABLE_CART_SPEED))
 
 
 class EnvState(NamedTuple):

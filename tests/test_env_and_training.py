@@ -171,6 +171,7 @@ def test_training_chunk_eval_and_checkpoint_roundtrip(tmp_path, monkeypatch):
     assert metrics["loss"].shape == (2,)
     assert np.isfinite(metrics["loss"]).all() and np.isfinite(metrics["upright"]).all()
     assert "swingup_success" in metrics  # the curriculum signal
+    assert np.isfinite(metrics["time_loss"]).all() and np.isfinite(metrics["time_to_stable"]).all()
 
     ev = make_evaluator(env, num_episodes=4)(runner.params, jax.random.key(0))
     assert 0.0 <= float(ev["success"]) <= 1.0
@@ -232,3 +233,31 @@ def test_replay_starts_use_the_buffer():
     state = env.reset(jax.random.key(0))
     state, _, _, _ = env.step_autoreset(jax.random.key(1), state, jnp.zeros(1), knobs)  # episode ends, reset
     assert state.start_replay and np.allclose(state.q, hard[0, :3]) and np.allclose(state.qd, hard[0, 3:])
+
+
+def test_symmetric_policy_and_critic():
+    from dprl.networks import MIRROR, TIE_BREAK_FORCE, actor, critic_outputs, init_params
+    env = DoublePendulumCart()
+    params = init_params(jax.random.key(0), 8, 1, (32, 32), symmetric=True, critic_heads=3)
+    params["actor"][-1]["w"] = params["actor"][-1]["w"] * 100  # a non-trivial policy
+    states = jax.vmap(lambda k: env.reset(k, mix=(0.0, 1.0, 0.0)))(jax.random.split(jax.random.key(1), 64))
+    obs = jax.vmap(env.obs)(states)
+    mean, _ = actor(params, obs)
+    mirrored, _ = actor(params, obs * MIRROR)
+    far = (np.cos(states.q[:, 1]) > -0.5)  # away from the hanging tie-break region
+    np.testing.assert_allclose(mirrored[far], -mean[far], atol=1e-5)
+    np.testing.assert_allclose(critic_outputs(params, obs * MIRROR), critic_outputs(params, obs), atol=1e-5)
+    # Fixed points of the mirror map: upright -> exactly 0; hanging still -> the tie-break push.
+    up = env.obs(env.reset(jax.random.key(0))._replace(q=jnp.zeros(3), qd=jnp.zeros(3)))
+    down = env.obs(env.reset(jax.random.key(0))._replace(q=jnp.array([0.0, jnp.pi, jnp.pi]), qd=jnp.zeros(3)))
+    assert np.isclose(actor(params, up)[0][0], 0.0, atol=1e-6)
+    assert np.isclose(actor(params, down)[0][0], TIE_BREAK_FORCE, atol=1e-4)
+
+
+def test_stable_upright_test():
+    from dprl.env import stable_obs
+    env = DoublePendulumCart()
+    s = env.reset(jax.random.key(0))
+    assert stable_obs(env.obs(s._replace(q=jnp.array([1.0, 0.1, -0.1]), qd=jnp.array([0.5, 1.0, -1.0]))))
+    assert not stable_obs(env.obs(s._replace(q=jnp.array([0.0, 0.3, 0.0]), qd=jnp.zeros(3))))
+    assert not stable_obs(env.obs(s._replace(q=jnp.zeros(3), qd=jnp.array([0.0, 2.0, 0.0]))))
