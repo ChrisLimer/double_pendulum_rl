@@ -30,7 +30,12 @@ without touching training.
     horizon) for the current state and for its mirror image, in reward units. Runs trained with
     reward scaling are converted back with the scale logged at that checkpoint. Balancing
     upright is worth about 400.
-  - **Symmetry:** the system is symmetric under x → −x, angles → −angles (velocities negated),
+  - **stable upright** shows the predicted time until the pendulum is stable upright, its spread,
+    and the chance of reaching it within ±0.5 s of the prediction. "Stable upright" means links
+    within 0.2 rad, rates below 1.5 rad/s, cart below 1 m/s. After the event it shows when it
+    happened and what was predicted at the start.
+  - **Symmetry:** for mirror-symmetric checkpoints the symmetry is built into the network, and the
+    selector has no effect. For older checkpoints: the system is symmetric under x → −x, angles → −angles (velocities negated),
     force → −force, but a policy can learn a preferred swing direction.
     - "Auto" acts with whichever of s and mirror(s) the critic values higher. When acting
       mirrored, the action is −π(mirror(s)).

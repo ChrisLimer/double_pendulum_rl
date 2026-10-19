@@ -253,6 +253,72 @@ same episodes:
 That this helps means the learned bias costs performance. Building the symmetry into training
 would remove it rather than correct it afterwards; see the next steps below.
 
+## Round 5: a mirror-symmetric policy and a time-to-stable prediction
+
+**Symmetry by construction.** Round 4 showed that the policies learn a preferred swing direction.
+That bias cost performance: picking the better of s and mirror(s) in the viewer improved random
+starts. Round 5 builds the symmetry into the networks ([networks.py](../dprl/networks.py)):
+
+```
+mean(s)  = ( f(o) − f(M o) ) / 2 + tie_break(o)        ⇒  mean(M s) = −mean(s)
+value(s) = ( g(o) + g(M o) ) / 2                        ⇒  value(M s) = value(s)
+```
+
+Here M is the mirror (x, angles and velocities negated). This holds exactly for any weights, and
+PPO stays on-policy: the Gaussian N(mean, σ) is itself mirror-symmetric. Both passes run as one
+batched call, but backpropagating through twice the batch still made training ~1.75× slower per
+step on the CPU.
+
+**The special case.** In states that are their own mirror image (cart centred, links exactly
+vertical, nothing moving), an equivariant mean is exactly 0, because neither direction is better.
+Upright that is correct: stand still. Hanging still it would wait forever. `tie_break()` therefore
+adds a small fixed push (0.3 × max force) that fades out within ~0.05 (observation units) of the
+hanging-still point, so the symmetry is exact everywhere else. The tests check equivariance, the
+zero action at the upright fixed point and the tie-break at the hanging one.
+
+**Time to stable upright.** Two extra critic outputs predict T, the time until the state is
+"stable upright", and E[T²]:
+- "Stable upright" means both links within 0.2 rad of vertical, link rates below 1.5 rad/s and
+  the cart slower than 1 m/s.
+- They are learned by TD(λ) like the value: T(s) = 0 if s is stable, else dt + T(s′). Leaving the
+  track counts as 20 s.
+- The dashboard shows T ± σ, where σ = √(E[T²] − T²), and the chance of being within ±0.5 s of
+  the prediction, assuming a normal distribution.
+
+**Runs:** 80M steps in group `sym`, 4 symmetric seeds and 2 non-symmetric seeds, all with the time
+heads. The table compares their final checkpoints on 256 fresh episodes per case
+([results/compare_sym.json](../experiments/results/compare_sym.json)):
+
+| | random: settle median / p90 | hanging still: settle | push 0.2 / 0.3 | other cases |
+|---|---|---|---|---|
+| **symmetric** (4 seeds) | **1.54 s / 2.32 s** | 1.77 s | 71% / 31% | 100%, 0% off-track |
+| not symmetric (2 seeds) | 2.20 s / 3.57 s | 1.88 s | 73% / 35% | 100%, 0% off-track |
+| phase A `Afix` (2 seeds, 120M) | 2.13 s / 3.18 s | 1.65 s | 75% / 33% | 100%, ≤ 1% off-track |
+
+- **Faster recovery from random states.** The symmetric policy settles ~30% faster. That is as
+  good as the old policies with the viewer's mirror trick (`Afix` + "auto": 1.46 s / 2.39 s), but
+  now built in.
+- **Much faster early learning:**
+
+  ![Learning speed](img/learning_speed_symmetry.png)
+
+  At 5M steps the symmetric seeds score 0.54–0.70, the non-symmetric ones ~0.05. All configurations
+  converge to 0.92–0.96 by ~30M steps.
+- **No gain at the limits.** Push recovery is the same within seed noise, and swinging up from
+  exactly hanging still is ~0.1 s slower than `Afix` (the tie-break start).
+
+**How good is the time prediction?** We compared predicted with actual time to stable upright
+along whole episodes ([experiments/time_calibration.py](../experiments/time_calibration.py)):
+
+| | random start: error at the start | all steps: within ±0.5 s | perturbed hanging: error at the start |
+|---|---|---|---|
+| symmetric (2 seeds) | 0.31–0.39 s | 88–94% | 0.08–0.09 s |
+| not symmetric (2 seeds) | 0.57–0.97 s | 63–84% | 0.09–0.19 s |
+
+The symmetric critic predicts much better, plausibly because it learns one function for both
+directions. The "chance within ±0.5 s" is roughly calibrated, though somewhat under-confident: in
+steps where it says 30–60%, the actual rate is 89–94%.
+
 ## Lessons
 
 1. **Look at trajectories before tuning.** Two rollouts showed the cart leaving the track within
@@ -275,11 +341,12 @@ would remove it rather than correct it afterwards; see the next steps below.
    penalty for needing it, removed track exits without hurting the swing-up.
 9. **A better critic can hurt exploration.** Reward scaling made learning faster, but without an
    entropy bonus the policy std could collapse before the swing-up was found.
+10. **Build known symmetries into the model.** The mirror-symmetric policy learned the swing-up
+    from far fewer samples, recovered faster from random states and predicted better. The only
+    cost was the exactly symmetric hanging-still state, which needs an explicit tie-break.
 
 ## Open issues and next steps
 
-- **Symmetry in training.** Mirror data augmentation (add every transition mirrored), or a policy
-  that is equivariant by construction (π(mirror s) = −π(s), V(mirror s) = V(s)).
 - **Pushes.** Recovery is good up to level 0.1 and partial at 0.2 (75%); level 0.3 still knocks
   it over, now safely. Longer training lets the push stage continue; a slower push ramp or a
   separate recovery signal might work better.

@@ -17,6 +17,8 @@ curriculum is updated and checkpoints are written.
 | clip / value coef / grad norm | 0.2 / 0.5 / 0.5 | value loss clipped as well |
 | learning rate | 3e-4, linear decay to 0 | Adam, eps 1e-5 |
 | networks | actor and critic MLPs, 3 × 256, tanh | 2 layers never learned the swing-up at 100 Hz |
+| mirror symmetry | on (`symmetric`) | the networks are averaged over a state and its mirror; see [networks.py](../dprl/networks.py) and [experiments.md](experiments.md) |
+| time-to-stable heads | on (`time_head`, weight 0.5) | critic outputs 1–2: time to stable upright and its second moment, by TD(λ) |
 | policy | Gaussian, state-independent log std (init −0.5) | the evaluator uses the mean |
 | entropy bonus | 0.005 | keeps the policy std from collapsing before the swing-up is found |
 | observation normalization | off (optional `obs_norm`) | running mean/std, folded into the first layer when saving; 2 of 4 seeds got stuck with it |

@@ -138,10 +138,42 @@ def fig_final_run():
     fig.savefig(IMG / "final_run_training.png", dpi=160)
 
 
+def fig_learning_speed():
+    """Checkpoint score (mean success over the five test cases) against training steps:
+    symmetric vs non-symmetric policies (group sym) and phase A's Afix runs."""
+    groups = {"symmetric (4 seeds)": ("sym", "sym_s"), "not symmetric (2 seeds)": ("sym", "nosym_s"),
+              "phase A, Afix (2 seeds)": ("phaseA", "Afix_s")}
+    from dprl import runs
+    fig, ax = plt.subplots(figsize=(10, 4), constrained_layout=True)
+    found = False
+    for i, (label, (group, prefix)) in enumerate(groups.items()):
+        paths = sorted(p for p in (ROOT / "runs" / group).glob(f"*_{prefix}*"))
+        for j, run in enumerate(paths):
+            metas = [runs.read_checkpoint_meta(c) for c in runs.list_checkpoints(run)]
+            pts = [(m["env_steps"] / 1e6, m["eval"].get("score")) for m in metas if m["eval"].get("score") is not None]
+            if not pts:
+                continue
+            found = True
+            x, y = zip(*pts)
+            ax.plot(x, y, color=SERIES[i], linewidth=1.6, alpha=0.9, label=label if j == 0 else None)
+    if not found:
+        print("runs for the learning-speed figure not found; skipping")
+        plt.close(fig)
+        return
+    ax.set_xlim(0, 80)
+    ax.set_ylim(0, 1.0)
+    ax.set_xlabel("environment steps (millions)")
+    ax.set_ylabel("checkpoint score")
+    ax.legend(loc="lower right", fontsize=9)
+    ax.set_title("Mirror symmetry speeds up early learning; all converge by ~30M steps · score = mean success over 5 test cases")
+    fig.savefig(IMG / "learning_speed_symmetry.png", dpi=160)
+
+
 if __name__ == "__main__":
     IMG.mkdir(parents=True, exist_ok=True)
     results = load_results()
     fig_seed_comparisons(results)
     fig_robustness()
     fig_final_run()
+    fig_learning_speed()
     print("written to", IMG)

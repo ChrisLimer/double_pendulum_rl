@@ -8,17 +8,17 @@ pendulum with the mouse.
 
 ![Round-3 run: swing-up success and curriculum over 200M steps](docs/img/final_run_training.png)
 
-## Results (current defaults, 2 seeds × 120M steps, ~3 h each with 8 runs sharing a laptop CPU)
+## Results (current defaults, 4 seeds × 80M steps, ~2.5 h each with 6 runs sharing a laptop CPU)
 
 Deterministic policy, real physics, 256 test episodes per case and seed:
 
 | Start / test | Success | Off-track | Notes |
 |---|---|---|---|
-| Hanging still (cart centred) | **100%** | 0% | upright and settled at 1.65 s, a single clean swing |
+| Hanging still (cart centred) | **100%** | 0% | upright and settled at ~1.8 s, a single clean swing |
 | Hanging, perturbed (cart ±1 m, links ±0.3 rad, swinging) | **100%** | 0% | |
-| Fully random angles and velocities | **100%** | ≤ 0.8% | 90% settled within 3.2 s (2.4 s with the mirror rule) |
+| Fully random angles and velocities | **100%** | 0% | settled in 1.5 s median, 90% within 2.3 s |
 | Random, cart near the ends (±2.5 m, ±1.5 m/s) | **100%** | 0% | |
-| Tip pushes every ~2.5 s, level 0.1 / 0.2 / 0.3 | 100% / 75% / 33% | 0% | strong pushes knock it over, but it stays on the track |
+| Tip pushes every ~2.5 s, level 0.1 / 0.2 / 0.3 | 100% / 71% / 31% | 0% | strong pushes knock it over, but it stays on the track |
 
 Success means: on the track for the whole 20 s episode and upright (both links within 0.3 rad)
 for at least 90% of its last 5 s. A track shield brakes the cart if it could not otherwise stop
@@ -54,6 +54,8 @@ uv run pytest                                    # tests (physics, rewards, curr
   fades out. A *track shield* overrides the action when the cart could not stop before the end.
 - **PPO** ([dprl/ppo.py](dprl/ppo.py)): PureJaxRL style, the rollout and the update are one jitted
   function; 64 envs × 128 steps per update, 3×256 tanh MLPs, γ = 0.9975, reward scaling, entropy 0.005.
+  The policy and critic are mirror-symmetric by construction (left/right swing-ups are learned as
+  one), and the critic also predicts the time until the pendulum is stable upright.
 - **Curriculum** ([dprl/curriculum.py](dprl/curriculum.py)), driven by the swing-up success of the
   hanging starts: easier physics (half gravity plus link drag) fades to real physics, then the
   share of near-upright starts drops from 50% to 10%, then starts get perturbed, random, close to
