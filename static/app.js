@@ -208,6 +208,8 @@ async function startEpisode() {
     if (token !== live.token) return;
     Object.assign(live, { env: p.env, policy: p.policy, ckpt: p.name, meta: p.meta, critic: p.critic,
                           valueScale: p.valueScale, timeMax: p.timeMax, symmetric: p.symmetric });
+    $("decode-label").hidden = !p.policy.bins;
+    p.policy.decode = $("decode").value;
     resetEpisode();
   } catch (e) {
     if (token !== live.token) return;
@@ -479,6 +481,7 @@ $("push-strength").addEventListener("input", (e) => ($("push-strength-value").te
 $("ckpt").addEventListener("change", startEpisode);
 $("start-mode").addEventListener("change", startEpisode);
 $("symmetry").addEventListener("change", startEpisode);
+$("decode").addEventListener("change", startEpisode);
 $("restart").addEventListener("click", startEpisode);
 $("run-select").addEventListener("change", (e) => {
   const url = new URL(location.href);

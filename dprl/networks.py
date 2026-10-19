@@ -19,9 +19,11 @@ The critic can have extra outputs (heads); value() is output 0, see ppo.py for t
 Discrete actions (optional, params contain "bins", the K force levels in [-1, 1], symmetric
 around 0): the actor outputs K logits of a categorical policy instead of a Gaussian mean. The
 mirror of action bin k is bin K-1-k, so the symmetric version averages f(o) with the reversed
-f(M o). actor() then returns the most likely level as its "mean", so every deterministic user of
-actor() (evaluators, diagnostics) works unchanged; at an exact tie, argmax picks the lowest bin,
-which breaks the symmetric hanging-still tie by itself."""
+f(M o). actor() then returns the expected force sum_k p_k bins_k as its "mean" (plus the same
+tie-break as the continuous policy), so every deterministic user of actor() (evaluators,
+diagnostics) works unchanged. The expected force is a smooth function of the state; the most
+likely level (argmax) balances just as well but switches between large forces ~70 times per
+second (see docs/experiments.md). actor_mode() gives that decoding for comparison."""
 
 import math
 
@@ -92,7 +94,10 @@ def actor(params, obs):
     """Gaussian policy: returns (mean, log_std). Works for single or batched obs.
     For a discrete policy, "mean" is the most likely force level (and log_std is unused)."""
     if "bins" in params:
-        level = params["bins"][jnp.argmax(policy_logits(params, obs), axis=-1)][..., None]
+        bins = jnp.asarray(params["bins"])  # loaded checkpoints hold numpy arrays
+        level = (jax.nn.softmax(policy_logits(params, obs)) @ bins)[..., None]
+        if "sym" in params:
+            level = level + tie_break(obs)
         return level, jnp.zeros_like(level)
     if "sym" in params:
         direct, mirrored = mlp_and_mirror(params["actor"], obs)
@@ -100,6 +105,12 @@ def actor(params, obs):
     else:
         mean = mlp(params["actor"], obs)
     return mean, jnp.broadcast_to(params["log_std"], mean.shape)
+
+
+def actor_mode(params, obs):
+    """Discrete policies only: the most likely force level (argmax; lowest bin on ties)."""
+    bins = jnp.asarray(params["bins"])
+    return bins[jnp.argmax(policy_logits(params, obs), axis=-1)][..., None]
 
 
 def critic_outputs(params, obs):

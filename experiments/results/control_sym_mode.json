@@ -1,0 +1,218 @@
+[
+ {
+  "label": "sym_s1",
+  "action_bins": 0,
+  "decode": "mode",
+  "env_steps": 80035840,
+  "balance": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 1.255,
+   "angle_rms_deg": 0.03267517313361168,
+   "cart_rms_m": 0.004960204940289259,
+   "force_mean_abs": 0.8584669232368469,
+   "force_jerk": 0.1401604861021042,
+   "sign_changes_per_s": 26.0953125,
+   "full_force_share": 0.01493359375,
+   "power_mean_W": 1.2438075542449951
+  },
+  "swing-up, hanging still": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 1.77,
+   "angle_rms_deg": 0.0531800277531147,
+   "cart_rms_m": 0.008482646197080612,
+   "force_mean_abs": 1.3091437816619873,
+   "force_jerk": 0.32288429141044617,
+   "sign_changes_per_s": 23.884375,
+   "full_force_share": 0.01463671875,
+   "power_mean_W": 1.6859277486801147
+  },
+  "swing-up, random": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 1.59,
+   "angle_rms_deg": 0.13337846100330353,
+   "cart_rms_m": 0.012368816882371902,
+   "force_mean_abs": 1.4459431171417236,
+   "force_jerk": 0.3526511788368225,
+   "sign_changes_per_s": 24.018359375,
+   "full_force_share": 0.021875,
+   "power_mean_W": 2.0507683753967285
+  },
+  "pushes 0.2": {
+   "success": 0.7109375,
+   "off_track": 0.0,
+   "settle_median": 16.439999999999998,
+   "angle_rms_deg": 10.584009170532227,
+   "cart_rms_m": 0.5807301998138428,
+   "force_mean_abs": 4.373140811920166,
+   "force_jerk": 0.8402163982391357,
+   "sign_changes_per_s": 2.0960937499999996,
+   "full_force_share": 0.06325,
+   "power_mean_W": 5.767402172088623
+  }
+ },
+ {
+  "label": "sym_s2",
+  "action_bins": 0,
+  "decode": "mode",
+  "env_steps": 80035840,
+  "balance": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 1.1350000000000002,
+   "angle_rms_deg": 0.026476804167032242,
+   "cart_rms_m": 0.004069336224347353,
+   "force_mean_abs": 0.759626567363739,
+   "force_jerk": 0.11558578908443451,
+   "sign_changes_per_s": 28.956640625,
+   "full_force_share": 0.0119453125,
+   "power_mean_W": 1.0906555652618408
+  },
+  "swing-up, hanging still": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 1.78,
+   "angle_rms_deg": 0.03038792684674263,
+   "cart_rms_m": 0.008052718825638294,
+   "force_mean_abs": 1.0189902782440186,
+   "force_jerk": 0.29639720916748047,
+   "sign_changes_per_s": 25.639843749999997,
+   "full_force_share": 0.0055390625,
+   "power_mean_W": 1.4635732173919678
+  },
+  "swing-up, random": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 1.775,
+   "angle_rms_deg": 0.13099078834056854,
+   "cart_rms_m": 0.017803801223635674,
+   "force_mean_abs": 1.3697731494903564,
+   "force_jerk": 0.3308781087398529,
+   "sign_changes_per_s": 26.852734374999997,
+   "full_force_share": 0.018515625,
+   "power_mean_W": 2.1393017768859863
+  },
+  "pushes 0.2": {
+   "success": 0.671875,
+   "off_track": 0.0,
+   "settle_median": 16.869999999999997,
+   "angle_rms_deg": 12.687609672546387,
+   "cart_rms_m": 0.592822790145874,
+   "force_mean_abs": 4.25810432434082,
+   "force_jerk": 0.7930961847305298,
+   "sign_changes_per_s": 2.1890625,
+   "full_force_share": 0.0435703125,
+   "power_mean_W": 5.5943498611450195
+  }
+ },
+ {
+  "label": "sym_s3",
+  "action_bins": 0,
+  "decode": "mode",
+  "env_steps": 80035840,
+  "balance": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 1.355,
+   "angle_rms_deg": 0.048066362738609314,
+   "cart_rms_m": 0.0028660281095653772,
+   "force_mean_abs": 0.9378251433372498,
+   "force_jerk": 0.15220916271209717,
+   "sign_changes_per_s": 30.2078125,
+   "full_force_share": 0.01516796875,
+   "power_mean_W": 1.3520119190216064
+  },
+  "swing-up, hanging still": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 1.8,
+   "angle_rms_deg": 0.028988702222704887,
+   "cart_rms_m": 0.0038878698833286762,
+   "force_mean_abs": 1.194152593612671,
+   "force_jerk": 0.2691122591495514,
+   "sign_changes_per_s": 29.421484375000002,
+   "full_force_share": 0.01255859375,
+   "power_mean_W": 1.8177480697631836
+  },
+  "swing-up, random": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 1.435,
+   "angle_rms_deg": 0.10477986931800842,
+   "cart_rms_m": 0.0072974227368831635,
+   "force_mean_abs": 1.278523564338684,
+   "force_jerk": 0.2952341139316559,
+   "sign_changes_per_s": 28.193749999999998,
+   "full_force_share": 0.01648046875,
+   "power_mean_W": 1.7461261749267578
+  },
+  "pushes 0.2": {
+   "success": 0.6796875,
+   "off_track": 0.0,
+   "settle_median": 16.6,
+   "angle_rms_deg": 10.72195053100586,
+   "cart_rms_m": 0.5783770084381104,
+   "force_mean_abs": 4.2832818031311035,
+   "force_jerk": 0.758797287940979,
+   "sign_changes_per_s": 2.356640625,
+   "full_force_share": 0.0446171875,
+   "power_mean_W": 5.511839866638184
+  }
+ },
+ {
+  "label": "sym_s4",
+  "action_bins": 0,
+  "decode": "mode",
+  "env_steps": 80035840,
+  "balance": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 1.165,
+   "angle_rms_deg": 0.017167406156659126,
+   "cart_rms_m": 0.0018555257702246308,
+   "force_mean_abs": 0.7644256353378296,
+   "force_jerk": 0.1413576304912567,
+   "sign_changes_per_s": 42.036328125,
+   "full_force_share": 0.01194140625,
+   "power_mean_W": 1.0547434091567993
+  },
+  "swing-up, hanging still": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 1.73,
+   "angle_rms_deg": 0.03342524915933609,
+   "cart_rms_m": 0.0010138043435290456,
+   "force_mean_abs": 1.4068586826324463,
+   "force_jerk": 0.3869916796684265,
+   "sign_changes_per_s": 40.268359375,
+   "full_force_share": 0.010640625,
+   "power_mean_W": 2.205796003341675
+  },
+  "swing-up, random": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 1.6600000000000001,
+   "angle_rms_deg": 0.14539079368114471,
+   "cart_rms_m": 0.0162204559892416,
+   "force_mean_abs": 1.4474360942840576,
+   "force_jerk": 0.38669922947883606,
+   "sign_changes_per_s": 39.200390625,
+   "full_force_share": 0.0201796875,
+   "power_mean_W": 2.121825695037842
+  },
+  "pushes 0.2": {
+   "success": 0.671875,
+   "off_track": 0.0,
+   "settle_median": 16.740000000000002,
+   "angle_rms_deg": 12.754987716674805,
+   "cart_rms_m": 0.5932210683822632,
+   "force_mean_abs": 4.309404373168945,
+   "force_jerk": 0.9878748059272766,
+   "sign_changes_per_s": 3.61640625,
+   "full_force_share": 0.048875,
+   "power_mean_W": 5.6601786613464355
+  }
+ }
+]

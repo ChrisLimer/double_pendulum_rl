@@ -30,6 +30,8 @@ without touching training.
     horizon) for the current state and for its mirror image, in reward units. Runs trained with
     reward scaling are converted back with the scale logged at that checkpoint. Balancing
     upright is worth about 400.
+  - **Discrete action** (only for discrete policies): show the policy with its expected force
+    (smooth, the default) or with its most likely level (bang-bang).
   - **stable upright** shows the predicted time until the pendulum is stable upright, its spread,
     and the chance of reaching it within ±0.5 s of the prediction. "Stable upright" means links
     within 0.2 rad, rates below 1.5 rad/s, cart below 1 m/s. After the event it shows when it

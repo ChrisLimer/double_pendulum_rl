@@ -11,6 +11,8 @@ dashboard, so many can run side by side, and they append their results to `resul
 | `robust_table.py` | `robust_eval` of all saved policies on the same episodes → `results/robust_table.json` |
 | `pbt.py <name> <pop> <steps> <interval> '<json>'` | Population-based training (exploit + greedy weight soup) → `results/pbt.jsonl` |
 | `compare_runs.py runs/<group>/*` | Final checkpoints of training runs on the same 256 episodes per case, with and without the mirror rule → `results/compare_<group>.json` |
+| `control_quality.py [--decode mode] runs/<group>/*` | Smoothness, effort and precision of the control (force, jerk, sign changes, angle RMS) → `results/control_<group>_<decode>.json` |
+| `plot_force_traces.py` | Cart force while balancing, continuous vs discrete → `docs/img/force_traces.png` |
 | `time_calibration.py runs/<run> ...` | Accuracy and calibration of the time-to-stable prediction |
 | `summarize.py [prefix ...]` | Per-experiment summary across seeds |
 | `import_runs.py <prefix ...>` | Copy saved weights into `runs/imported/` so the dashboard can show them |

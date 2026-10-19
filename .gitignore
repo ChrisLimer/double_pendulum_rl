@@ -11,7 +11,7 @@ wheels/
 .venv
 
 # Training output (metrics + checkpoints) and saved model weights
-runs/
+/runs
 experiments/results/params/
 experiments/results/log.txt
 *.npz

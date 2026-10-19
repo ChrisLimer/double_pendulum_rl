@@ -319,6 +319,86 @@ The symmetric critic predicts much better, plausibly because it learns one funct
 directions. The "chance within ±0.5 s" is roughly calibrated, though somewhat under-confident: in
 steps where it says 30–60%, the actual rate is 89–94%.
 
+## Round 6: discrete actions
+
+**Question.** Would a discrete action space work as well or better: just {−30, 0, +30} N, or more
+levels for finer control? Bang-bang control is time-optimal for many swing-up problems. And a
+categorical policy can represent "push left *or* right" as two separate options, where a Gaussian
+can only average them.
+
+**Implementation** ([networks.py](../dprl/networks.py), `PPOConfig.action_bins`):
+- The actor outputs K logits of a categorical distribution over K evenly spaced force levels in
+  [−30, 30] N ([Tang & Agrawal 2020](https://arxiv.org/abs/1901.10500)).
+- The mirror of level k is level K−1−k, so the symmetric version averages the logits of a state
+  with the reversed logits of its mirror.
+- PPO samples a level per step, with log-probabilities from the softmax and a categorical entropy
+  bonus.
+- Everything else (shield, curriculum, time heads) is unchanged.
+
+**Runs** (60M steps, symmetric, group `discrete`): K = 3, 7 and 21, 2 seeds each.
+
+**Two ways to turn the policy into one deterministic force:**
+
+- *Most likely level* (argmax). For K = 3 this is true bang-bang control: only −30, 0 or +30 N.
+- *Expected force* F̄(s) = Σₖ pₖ(s)·Fₖ, which for K = 3 is 30 N · (p₊ − p₋). It is a smooth
+  function of the state even though only three levels were ever applied in training. At the
+  exactly symmetric hanging-still state F̄ = 0, so it gets the same tie-break as the continuous
+  policy.
+
+**Results** (256 episodes per case, expected-force decoding,
+[compare_discrete.json](../experiments/results/compare_discrete.json)):
+
+| | still, perturbed, random, edge, push 0.1 | push 0.2 / 0.3 | off-track | settle: still / random median / p90 |
+|---|---|---|---|---|
+| continuous, symmetric (4 seeds, 80M) | 100% | 71% / 31% | 0% | 1.77 s / 1.54 s / 2.32 s |
+| 3 levels (2 seeds, 60M) | 100% | 71% / 33% | 0% | 1.73 s / 1.39 s / 2.25 s |
+| 7 levels (2 seeds, 60M) | 100% | 66% / 30% | 0% | 1.74 s / 1.44 s / 2.26 s |
+| 21 levels (2 seeds, 60M) | 100% | 67% / 30% | 0% | 1.70 s / 1.37 s / 2.27 s |
+
+Learning speed was about the same as the continuous symmetric policy: slightly slower in the
+first ~5M steps, equal or slightly ahead from ~20M.
+
+**How they control while balancing**
+([experiments/control_quality.py](../experiments/control_quality.py), 128 near-upright episodes,
+last 15 s):
+
+| | mean force | force change per step | sign changes per s | angle RMS |
+|---|---|---|---|---|
+| continuous | 0.8–0.9 N | 0.1–0.2 N | 26–42 | 0.02–0.05° |
+| discrete, most likely level | 2.3–14 N | 3.5–27 N | 25–73 | 0.06–0.14° |
+| discrete, expected force | 0.7–0.8 N | 0.1 N | 9–15 | 0.03–0.06° |
+
+![Cart force while balancing](img/force_traces.png)
+
+**Analysis.**
+
+1. **Three force levels are enough to learn the task.** The 3-level policy learned as fast and
+   reached the same success as the continuous and finer discrete policies. Swinging up is close
+   to bang-bang anyway, and the swing-ups were even slightly faster (random-start settling
+   1.4 s vs 1.5 s).
+2. **Decoded by the most likely level, the 3-level policy balances by "dithering":** short ±30 N
+   pulse pairs, up to ~70 sign changes per second (see the figure). It is as precise as the
+   continuous policy in angle, but on real hardware this would mean vibration, motor heating and
+   excited unmodelled dynamics. More levels did not remove it reliably: the argmax of a 21-level
+   policy also jumped between distant levels in some seeds.
+3. **The expected force gives a smooth controller from the same network.** It was as smooth as the
+   continuous policy or smoother (fewer sign changes), with the same success and swing-up times,
+   because the probabilities pₖ(s) vary smoothly with the state. This is the categorical
+   analogue of using the Gaussian's mean.
+4. **Number of levels.** 3, 7 and 21 performed the same within seed noise. With expected-force
+   decoding the resolution of the output does not depend on K, so a small K is fine; K = 3 is
+   the simplest.
+5. **What a discrete policy adds.** It can represent both "full left" and "full right" as likely
+   at the same time, which a Gaussian cannot. The expected force averages them away, but that only
+   matters where both are genuinely good, i.e. at the symmetric hanging-still state, where the
+   tie-break handles it.
+
+**Conclusion.** Discrete actions work as well as continuous ones here, and 3 levels are enough,
+as long as the deployed controller uses the expected force. Use the most likely level only if
+the actuator can *only* do on/off; then expect dithering while balancing. The continuous
+policy stays the default. The discrete option is kept (`--ppo action_bins=K`), and the dashboard
+can show both decodings.
+
 ## Lessons
 
 1. **Look at trajectories before tuning.** Two rollouts showed the cart leaving the track within
@@ -344,6 +424,9 @@ steps where it says 30–60%, the actual rate is 89–94%.
 10. **Build known symmetries into the model.** The mirror-symmetric policy learned the swing-up
     from far fewer samples, recovered faster from random states and predicted better. The only
     cost was the exactly symmetric hanging-still state, which needs an explicit tie-break.
+11. **Discrete is not the same as bang-bang.** A 3-level categorical policy learned the task as
+    well as a continuous one; how it is decoded decides whether it chatters (most likely level)
+    or controls smoothly (expected force).
 
 ## Open issues and next steps
 

@@ -55,7 +55,9 @@ uv run pytest                                    # tests (physics, rewards, curr
 - **PPO** ([dprl/ppo.py](dprl/ppo.py)): PureJaxRL style, the rollout and the update are one jitted
   function; 64 envs × 128 steps per update, 3×256 tanh MLPs, γ = 0.9975, reward scaling, entropy 0.005.
   The policy and critic are mirror-symmetric by construction (left/right swing-ups are learned as
-  one), and the critic also predicts the time until the pendulum is stable upright.
+  one), and the critic also predicts the time until the pendulum is stable upright. A discrete
+  (categorical) action space is available too: even 3 force levels work as well, if decoded by
+  their expected force.
 - **Curriculum** ([dprl/curriculum.py](dprl/curriculum.py)), driven by the swing-up success of the
   hanging starts: easier physics (half gravity plus link drag) fades to real physics, then the
   share of near-upright starts drops from 50% to 10%, then starts get perturbed, random, close to

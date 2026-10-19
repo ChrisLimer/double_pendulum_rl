@@ -264,14 +264,16 @@ def test_stable_upright_test():
 
 
 def test_discrete_policy_trains_and_is_symmetric(tmp_path, monkeypatch):
-    from dprl.networks import MIRROR, actor, init_params, policy_logits
+    from dprl.networks import MIRROR, actor, actor_mode, init_params, policy_logits
     params = init_params(jax.random.key(0), 8, 1, (32, 32), symmetric=True, action_bins=5)
     params["actor"][-1]["w"] = params["actor"][-1]["w"] * 100
     obs = jax.vmap(DoublePendulumCart().obs)(jax.vmap(lambda k: DoublePendulumCart().reset(k, mix=(0.0, 1.0, 0.0)))(
         jax.random.split(jax.random.key(1), 32)))
     np.testing.assert_allclose(policy_logits(params, obs * MIRROR), policy_logits(params, obs)[:, ::-1], atol=1e-5)
-    level, _ = actor(params, obs)
-    assert set(np.round(np.asarray(level[:, 0]), 3)) <= {-1.0, -0.5, 0.0, 0.5, 1.0}
+    mode = actor_mode(params, obs)  # the most likely force level
+    assert set(np.round(np.asarray(mode[:, 0]), 3)) <= {-1.0, -0.5, 0.0, 0.5, 1.0}
+    level, _ = actor(params, obs)  # the expected force: smooth, in [-1, 1]
+    assert np.all(np.abs(level) <= 1.0 + 1e-6) and len(set(np.round(np.asarray(level[:, 0]), 3))) > 5
     # One training chunk with a 3-level policy, then a checkpoint round trip.
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path)
     env = DoublePendulumCart()
@@ -285,3 +287,5 @@ def test_discrete_policy_trains_and_is_symmetric(tmp_path, monkeypatch):
     _, cfg2, env2 = runs.load_config(run)
     loaded, _ = runs.load_checkpoint(runs.list_checkpoints(run)[-1], cfg2, env2)
     np.testing.assert_array_equal(loaded["bins"], [-1.0, 0.0, 1.0])
+    # Loaded (numpy) params work under jit too.
+    assert np.asarray(jax.jit(lambda o: actor(loaded, o)[0])(obs[:4])).shape == (4, 1)

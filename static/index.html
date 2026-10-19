@@ -91,6 +91,12 @@
             <option value="mirror">Always mirrored</option>
           </select>
         </label>
+        <label id="decode-label" hidden title="How a discrete (categorical) policy is turned into one force">Discrete action
+          <select id="decode">
+            <option value="mean" selected>Expected force (smooth)</option>
+            <option value="mode">Most likely level (bang-bang)</option>
+          </select>
+        </label>
       </div>
       <div id="sim-info" class="num">
         <span class="muted">policy</span><span id="info-ckpt">–</span>

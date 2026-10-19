@@ -170,17 +170,28 @@ function tieBreak(o) {
 }
 
 // loadPolicy(layers, symmetric) marks the network; the functions below apply the symmetry.
-function actorMean(policy, o) {
-  if (policy.bins) {  // categorical policy: the most likely force level (lowest bin on ties)
-    let logits = mlp(policy, o);
-    if (policy.symmetric) {
-      const mirrored = mlp(policy, mirrorObs(o));
-      logits = logits.map((v, k) => (v + mirrored[logits.length - 1 - k]) / 2);
-    }
+// Categorical policy: the expected force (default, as dprl/networks.py actor) or, with
+// policy.decode === "mode", the most likely level (lowest bin on ties).
+function discreteAction(policy, o) {
+  let logits = mlp(policy, o);
+  if (policy.symmetric) {
+    const mirrored = mlp(policy, mirrorObs(o));
+    logits = logits.map((v, k) => (v + mirrored[logits.length - 1 - k]) / 2);
+  }
+  if (policy.decode === "mode") {
     let best = 0;
     for (let k = 1; k < logits.length; k++) if (logits[k] > logits[best]) best = k;
     return policy.bins[best];
   }
+  const top = Math.max(...logits);
+  const p = logits.map((v) => Math.exp(v - top));
+  const z = p.reduce((a, b) => a + b, 0);
+  const mean = p.reduce((acc, v, k) => acc + v * policy.bins[k], 0) / z;
+  return policy.symmetric ? mean + tieBreak(o) : mean;
+}
+
+function actorMean(policy, o) {
+  if (policy.bins) return discreteAction(policy, o);
   const m = mlp(policy, o)[0];
   return policy.symmetric ? (m - mlp(policy, mirrorObs(o))[0]) / 2 + tieBreak(o) : m;
 }

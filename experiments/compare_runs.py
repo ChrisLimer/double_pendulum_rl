@@ -86,7 +86,7 @@ def main():
         config, cfg, env = runs.load_config(run)
         params, meta = runs.load_checkpoint(runs.list_checkpoints(run)[-1], cfg, env)
         label = config.get("label") or run.name
-        results[label] = {"run": str(run.resolve().relative_to(ROOT)), "env_steps": meta.get("env_steps"),
+        results[label] = {"run": str(run.resolve().relative_to(runs.RUNS_DIR.resolve())), "env_steps": meta.get("env_steps"),
                           **make_eval(env, params)(jax.random.key(2024))}
         r = results[label]
         print(f"{label:10s} " + " ".join(f"{c}:{r['off/' + c]['success']:.2f}->{r['auto/' + c]['success']:.2f}"
