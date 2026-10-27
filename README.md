@@ -20,6 +20,11 @@ Deterministic policy, real physics, 256 test episodes per case and seed:
 | Random, cart near the ends (±2.5 m, ±1.5 m/s) | **100%** | 0% | |
 | Tip pushes every ~2.5 s, level 0.1 / 0.2 / 0.3 | 100% / 71% / 31% | 0% | strong pushes knock it over, but it stays on the track |
 
+**Triple pendulum** (`--links 3`, same settings, 3 seeds × 150M steps): 100% swing-up from hanging
+still or perturbed in ~3 s, 68–98% from random starts depending on the seed (best seed 98%),
+balance 98–100%, but pushes still knock it over. See
+[docs/experiments.md](docs/experiments.md#round-7-the-triple-pendulum-and-any-number-of-links).
+
 Success means: on the track for the whole 20 s episode and upright (both links within 0.3 rad)
 for at least 90% of its last 5 s. A track shield brakes the cart if it could not otherwise stop
 before the end. Before it existed, up to 30% of the pushed episodes left the track. How we got

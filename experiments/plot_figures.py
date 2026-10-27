@@ -169,6 +169,42 @@ def fig_learning_speed():
     fig.savefig(IMG / "learning_speed_symmetry.png", dpi=160)
 
 
+def fig_triple_learning():
+    """Triple pendulum: checkpoint score and swing-up success from hanging still against steps,
+    for the default settings and the two variants that were stopped early."""
+    from dprl import runs
+    groups = {"default (3 × 256, γ = 0.9975)": ("triple", "triple_s"),
+              "longer horizon (γ = 0.999)": ("triple_stopped", "triple_g999_s"),
+              "wider network (3 × 512)": ("triple_stopped", "triple_w512_s")}
+    fig, (a, b) = plt.subplots(1, 2, figsize=(11, 3.8), constrained_layout=True, sharey=True)
+    found = False
+    for i, (label, (group, prefix)) in enumerate(groups.items()):
+        for j, run in enumerate(sorted((ROOT / "runs" / group).glob(f"*_{prefix}*"))):
+            metas = [runs.read_checkpoint_meta(c) for c in runs.list_checkpoints(run)]
+            pts = [(m["env_steps"] / 1e6, m["eval"].get("score"), m["eval"].get("success")) for m in metas
+                   if m["eval"].get("score") is not None]
+            if not pts:
+                continue
+            found = True
+            x, score, still = zip(*pts)
+            style = dict(color=SERIES[i], linewidth=1.6 if i == 0 else 2.2, linestyle="-" if i == 0 else "--",
+                         zorder=2 if i == 0 else 3, label=f"{label}{'' if i == 0 else ', stopped'}" if j == 0 else None)
+            a.plot(x, score, **style)
+            b.plot(x, still, **style)
+    if not found:
+        print("triple-pendulum runs not found; skipping")
+        plt.close(fig)
+        return
+    for ax, title in [(a, "Score (mean success over 5 test cases)"), (b, "Swing-up from hanging still")]:
+        ax.set_ylim(0, 1.02)
+        ax.set_xlabel("environment steps (millions)")
+        ax.set_title(title)
+    a.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1.0))
+    a.legend(loc="lower right", fontsize=9)
+    fig.suptitle("Triple pendulum on a cart · deterministic policy, real physics", x=0.01, ha="left", fontweight="bold")
+    fig.savefig(IMG / "triple_learning.png", dpi=160)
+
+
 if __name__ == "__main__":
     IMG.mkdir(parents=True, exist_ok=True)
     results = load_results()
@@ -176,4 +212,5 @@ if __name__ == "__main__":
     fig_robustness()
     fig_final_run()
     fig_learning_speed()
+    fig_triple_learning()
     print("written to", IMG)

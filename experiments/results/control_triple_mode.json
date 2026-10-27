@@ -1,0 +1,164 @@
+[
+ {
+  "label": "triple_s1",
+  "action_bins": 0,
+  "decode": "mode",
+  "env_steps": 149995520,
+  "balance": {
+   "success": 0.9921875,
+   "off_track": 0.0078125,
+   "settle_median": 1.495,
+   "angle_rms_deg": 12.069271087646484,
+   "cart_rms_m": 0.2000454068183899,
+   "force_mean_abs": 2.735187292098999,
+   "force_jerk": 0.6313384771347046,
+   "sign_changes_per_s": 6.6234375,
+   "full_force_share": 0.0535703125,
+   "power_mean_W": 5.673974514007568
+  },
+  "swing-up, hanging still": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 2.97,
+   "angle_rms_deg": 0.5171257257461548,
+   "cart_rms_m": 0.04103774204850197,
+   "force_mean_abs": 2.0285379886627197,
+   "force_jerk": 0.4899345934391022,
+   "sign_changes_per_s": 6.2203125,
+   "full_force_share": 0.01494921875,
+   "power_mean_W": 3.4081919193267822
+  },
+  "swing-up, random": {
+   "success": 0.9296875,
+   "off_track": 0.0703125,
+   "settle_median": 4.23,
+   "angle_rms_deg": 23.36194610595703,
+   "cart_rms_m": 0.39840319752693176,
+   "force_mean_abs": 4.633731365203857,
+   "force_jerk": 1.3189924955368042,
+   "sign_changes_per_s": 6.2,
+   "full_force_share": 0.0864765625,
+   "power_mean_W": 9.143438339233398
+  },
+  "pushes 0.2": {
+   "success": 0.125,
+   "off_track": 0.0078125,
+   "settle_median": 20.0,
+   "angle_rms_deg": 67.60272979736328,
+   "cart_rms_m": 0.9678621292114258,
+   "force_mean_abs": 14.344934463500977,
+   "force_jerk": 3.1946017742156982,
+   "sign_changes_per_s": 6.3296875,
+   "full_force_share": 0.30628515625,
+   "power_mean_W": 28.753860473632812
+  }
+ },
+ {
+  "label": "triple_s2",
+  "action_bins": 0,
+  "decode": "mode",
+  "env_steps": 149995520,
+  "balance": {
+   "success": 0.984375,
+   "off_track": 0.0078125,
+   "settle_median": 2.36,
+   "angle_rms_deg": 12.946797370910645,
+   "cart_rms_m": 0.24588410556316376,
+   "force_mean_abs": 2.921579122543335,
+   "force_jerk": 0.6279395818710327,
+   "sign_changes_per_s": 4.23828125,
+   "full_force_share": 0.0474296875,
+   "power_mean_W": 5.678516387939453
+  },
+  "swing-up, hanging still": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 3.14,
+   "angle_rms_deg": 0.35601606965065,
+   "cart_rms_m": 0.07887586951255798,
+   "force_mean_abs": 1.8783199787139893,
+   "force_jerk": 0.3277050256729126,
+   "sign_changes_per_s": 3.7874999999999996,
+   "full_force_share": 0.0112421875,
+   "power_mean_W": 3.076925039291382
+  },
+  "swing-up, random": {
+   "success": 0.6640625,
+   "off_track": 0.2421875,
+   "settle_median": 7.085000000000001,
+   "angle_rms_deg": 63.99026107788086,
+   "cart_rms_m": 1.023271083831787,
+   "force_mean_abs": 9.814603805541992,
+   "force_jerk": 2.6704518795013428,
+   "sign_changes_per_s": 6.099609375,
+   "full_force_share": 0.21649609375,
+   "power_mean_W": 21.054616928100586
+  },
+  "pushes 0.2": {
+   "success": 0.109375,
+   "off_track": 0.046875,
+   "settle_median": 20.0,
+   "angle_rms_deg": 69.18907165527344,
+   "cart_rms_m": 1.0170226097106934,
+   "force_mean_abs": 12.879388809204102,
+   "force_jerk": 2.886784076690674,
+   "sign_changes_per_s": 5.708203125,
+   "full_force_share": 0.2274140625,
+   "power_mean_W": 25.99020767211914
+  }
+ },
+ {
+  "label": "triple_s3",
+  "action_bins": 0,
+  "decode": "mode",
+  "env_steps": 149995520,
+  "balance": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 1.4649999999999999,
+   "angle_rms_deg": 3.998237133026123,
+   "cart_rms_m": 0.1062648668885231,
+   "force_mean_abs": 2.116983652114868,
+   "force_jerk": 0.5444431304931641,
+   "sign_changes_per_s": 6.694140624999999,
+   "full_force_share": 0.033484375,
+   "power_mean_W": 3.934502363204956
+  },
+  "swing-up, hanging still": {
+   "success": 1.0,
+   "off_track": 0.0,
+   "settle_median": 3.18,
+   "angle_rms_deg": 0.3301149308681488,
+   "cart_rms_m": 0.01907423697412014,
+   "force_mean_abs": 1.9226363897323608,
+   "force_jerk": 0.45082923769950867,
+   "sign_changes_per_s": 6.799609374999999,
+   "full_force_share": 0.01655859375,
+   "power_mean_W": 3.1069014072418213
+  },
+  "swing-up, random": {
+   "success": 0.9921875,
+   "off_track": 0.0078125,
+   "settle_median": 3.79,
+   "angle_rms_deg": 13.301491737365723,
+   "cart_rms_m": 0.21239764988422394,
+   "force_mean_abs": 3.4055943489074707,
+   "force_jerk": 0.9866364002227783,
+   "sign_changes_per_s": 6.47578125,
+   "full_force_share": 0.04985546875,
+   "power_mean_W": 5.459876537322998
+  },
+  "pushes 0.2": {
+   "success": 0.15625,
+   "off_track": 0.0,
+   "settle_median": 19.855,
+   "angle_rms_deg": 61.99851989746094,
+   "cart_rms_m": 0.8291551470756531,
+   "force_mean_abs": 11.385629653930664,
+   "force_jerk": 3.174816608428955,
+   "sign_changes_per_s": 6.669140625,
+   "full_force_share": 0.183390625,
+   "power_mean_W": 20.44708251953125
+  }
+ }
+]

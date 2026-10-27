@@ -19,7 +19,7 @@ without touching training.
 - **Charts:** each metric from `metrics.jsonl` (see [training.md](training.md)), raw and smoothed,
   updated every 2 s.
 - **Simulator:** the selected checkpoint (or "Latest", which follows new checkpoints) running live
-  in the browser at the control rate.
+  in the browser at the control rate, with as many links as the run's pendulum has.
   - **Start** picks the start type: hanging still (the evaluator start), hanging perturbed, mixed,
     fully random or near upright.
   - **Pushing:** drag the tip with the mouse, or hold ← / → to push it with the force set by the

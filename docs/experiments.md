@@ -399,6 +399,64 @@ the actuator can *only* do on/off; then expect dithering while balancing. The co
 policy stays the default. The discrete option is kept (`--ppo action_bins=K`), and the dashboard
 can show both decodings.
 
+## Round 7: the triple pendulum (and any number of links)
+
+**Generalisation.** The environment is now a chain of n links (`PendulumCart`, `train.py --links N`).
+- **Physics:** closed-form n-link equations of motion. For n = 2 they reproduce the original
+  formulas exactly, which a test checks against a frozen copy.
+- **Observations:** 2 + 3n values.
+- **Generic in n:** the mirror symmetry, the stable-upright test, the reward (the broad term is a
+  product over the links), the starts, the replay buffer and the evaluators.
+- **Browser:** the simulator solves the (n + 1) × (n + 1) system by Gaussian elimination and draws
+  any number of links. The parity check passes for 2 and 3 links (~10⁻⁷).
+
+With three links the motion is faster. 5 ms RK4 steps lost ~2·10⁻⁴ of the energy in 2 s of
+chaotic motion, and 2.5 ms steps (`substeps = 4`) bring it to float32 noise.
+
+**Training.** We kept every setting of the 2-link defaults: 0.3 kg and 0.5 m per link, so the
+pendulum is 1.5 m tall, the same 30 N force, ±3 m track and curriculum. Runs were 150M steps,
+~10k steps/s each with four in parallel. Two variants were stopped early:
+
+| variant | at the stop | why stopped |
+|---|---|---|
+| longer horizon, γ = 0.999 (~10 s) | 0% reach-the-top or 34%, no success, at 22M | the default runs already swung up at 22M |
+| wider network, 3 × 512 | balanced 19% of the time from upright starts at 33M | default runs were at 60–70% by 20M, at twice the speed |
+
+A triple swing-up may take several pumping swings, but a 10 s horizon made the value much harder
+to learn. A wider network learned more slowly per step and cost twice the compute.
+
+![Triple pendulum learning curves](img/triple_learning.png)
+
+**Results** (3 seeds, final checkpoints, 256 episodes per case,
+[compare_triple.json](../experiments/results/compare_triple.json),
+[control_triple_mode.json](../experiments/results/control_triple_mode.json)):
+
+| | seed 1 | seed 2 | seed 3 |
+|---|---|---|---|
+| hanging still / perturbed | 100% / 100% | 100% / 100% | 100% / 100% |
+| random starts (off-track) | 89% (11%) | 68% (25%) | **98% (2%)** |
+| random, cart near the ends | 94% | 69% | 98% |
+| near upright (balance) | 99% | 98% | 100% |
+| pushes level 0.1 / 0.2 | 29% / 7% | 22% / 7% | 31% / 9% |
+| swing-up from hanging still, settled after | 2.97 s | 3.13 s | 3.18 s |
+
+- **The swing-up and balance work.** From hanging still all three seeds swing the triple
+  pendulum up every time in ~3 s (the double pendulum takes ~1.8 s) and hold it within 0.3–0.5°
+  RMS.
+- **Random starts depend on the seed.** The best seed manages 98% with 2% off-track. Unlike for
+  the double pendulum, the track shield does not prevent all exits: with three links swinging,
+  their reaction forces can exceed the shield's braking margin (9 m/s²).
+- **Pushes are the weak spot.** The same push on the tip of a taller, more sensitive pendulum
+  knocks it over, and the curriculum's push stage barely started. The training curves show the
+  swing-up success needed most of the run to reach the curriculum's 90% threshold.
+- **Time-to-stable prediction.** Error ~0.2–0.3 s from perturbed hanging starts, but 1.1–1.6 s
+  from random starts. These take longer (median ~4.2 s) and are less predictable.
+
+**Next steps for the triple:**
+- longer training, so the push stage gets time
+- a stronger shield deceleration margin, or a learned recovery/"calm-down" controller
+- possibly more force or a longer track, as in hardware setups
+
 ## Lessons
 
 1. **Look at trajectories before tuning.** Two rollouts showed the cart leaving the track within
