@@ -58,8 +58,13 @@ async function refresh() {
 }
 
 function restart() {
-  const s = sim.reset($("top-start").value);  // the same start for every run
-  for (const t of top.sims) Object.assign(t, { q: [...s.q], qd: [...s.qd], t: 0, up: 0, ended: null, shielded: false });
+  const starts = new Map();  // the same start for every run with the same number of links
+  for (const t of top.sims) {
+    const n = sim.chain(t.env).n;
+    if (!starts.has(n)) starts.set(n, sim.reset($("top-start").value, t.env));
+    const s = starts.get(n);
+    Object.assign(t, { q: [...s.q], qd: [...s.qd], t: 0, up: 0, ended: null, shielded: false });
+  }
   top.ended = 0;
 }
 
@@ -80,17 +85,19 @@ function draw(t) {
   if (c.width !== Math.round(W * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
-  const env = t.env, L = env.l1 + env.l2;
+  const env = t.env, L = sim.chain(env).l.reduce((a, b) => a + b, 0);
   const scale = Math.min(W / (2 * (env.x_limit + 0.3)), H / (2 * L + 0.3));
   const px = (x, y) => [W / 2 + x * scale, H / 2 - y * scale];
   ctx.strokeStyle = "#6b7280"; ctx.lineWidth = 1.5;
   ctx.beginPath(); ctx.moveTo(...px(-env.x_limit, -0.08)); ctx.lineTo(...px(env.x_limit, -0.08)); ctx.stroke();
-  const [pivot, p1, tip] = sim.points(env, t.q);
+  const pts = sim.points(env, t.q), pivot = pts[0];
   const [cx, cy] = px(pivot[0] - 0.2, 0.07);
   ctx.fillStyle = t.shielded ? "#ffb04c" : "#3a4250";
   ctx.fillRect(cx, cy, 0.4 * scale, 0.14 * scale);
   ctx.strokeStyle = t.ended === "left the track" ? "#ff6b6b" : "#e6e8eb"; ctx.lineWidth = 2.5; ctx.lineCap = "round";
-  ctx.beginPath(); ctx.moveTo(...px(...pivot)); ctx.lineTo(...px(...p1)); ctx.lineTo(...px(...tip)); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(...px(...pivot));
+  for (const p of pts.slice(1)) ctx.lineTo(...px(...p));
+  ctx.stroke();
   t.status.textContent = `${t.t.toFixed(1)} s · upright ${Math.round((100 * t.up) / Math.max(t.t, 1e-9))}%` +
     (t.ended ? ` · ${t.ended}` : t.shielded ? " · shield" : "");
 }

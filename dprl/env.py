@@ -1,11 +1,26 @@
-"""Double pendulum on a cart, as pure JAX functions (jit/vmap friendly).
+"""An n-link pendulum on a cart (double by default, triple etc. by configuration), as pure JAX
+functions (jit/vmap friendly).
 
-Generalized coordinates q = (x, th1, th2):
-    x    cart position [m]
-    th1  angle of the lower link from vertical-up [rad], wrapped to [-pi, pi)
-    th2  angle of the upper link from vertical-up [rad]  (absolute, not relative)
-Both links are massless rods with point masses m1, m2 at their ends.
-The action is a horizontal force on the cart, a in [-1, 1] scaled by max_force.
+Generalized coordinates q = (x, th_1, ..., th_n):
+    x     cart position [m]
+    th_i  angle of link i (1 = lowest) from vertical-up [rad], wrapped to [-pi, pi);
+          absolute angles, not relative to the link below
+The links are massless rods of lengths link_lengths with point masses link_masses at their
+upper ends; n = len(link_masses). The action is a horizontal force on the cart, a in [-1, 1]
+scaled by max_force.
+
+Equations of motion (Lagrange, closed form for a chain of point masses), with mu_i = sum_{k>=i} m_k
+the mass carried by link i and mu_ij = mu_max(i,j):
+    D q'' = rhs
+    D_xx = M + sum m,   D_xi = mu_i l_i cos th_i,   D_ij = mu_ij l_i l_j cos(th_i - th_j)
+    rhs_x = F + f_x + sum_i mu_i l_i sin th_i w_i^2
+    rhs_i = g mu_i l_i sin th_i - sum_j mu_ij l_i l_j sin(th_i - th_j) w_j^2
+            + l_i (f_x cos th_i - f_y sin th_i) - damping w_i
+(f = force on the top mass). tests/reference_two_link.py keeps the original 2-link formulas,
+which this reproduces exactly for n = 2.
+
+Observation (2 + 3n values): x / x_limit, (sin th_i, cos th_i) for each link, cart speed / 3,
+link rates / 10. obs_layout() gives the indices.
 
 The task covers swing-up, balancing and recovery: training episodes start hanging still or
 near upright (the curriculum sets the mix), only end when the cart leaves the track (or at
@@ -20,8 +35,9 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
-UPRIGHT_ANGLE = 0.3   # both links within this of vertical counts as "upright" for metrics
+UPRIGHT_ANGLE = 0.3   # all links within this of vertical counts as "upright" for metrics
 # Settle-in time before "upright" counts for the upright_late metric: 1 s for episodes that
 # start upright, 5 s for episodes that start down (time to swing up).
 SETTLE_TIME_UP, SETTLE_TIME_DOWN = 1.0, 5.0
@@ -32,22 +48,29 @@ SUCCESS_WINDOW, SUCCESS_FRACTION = 5.0, 0.9
 DEFAULT_START_MIX = (0.5, 0.0, 0.5)
 # Replay starts: states this long before the shield fired or the cart left the track.
 REPLAY_LOOKBACK = 0.5
-# "Stable upright" for the time-to-stable prediction: both links within STABLE_ANGLE of vertical,
-# both link rates below STABLE_RATE and the cart slower than STABLE_CART_SPEED.
+# "Stable upright" for the time-to-stable prediction: all links within STABLE_ANGLE of vertical,
+# all link rates below STABLE_RATE and the cart slower than STABLE_CART_SPEED.
 STABLE_ANGLE, STABLE_RATE, STABLE_CART_SPEED = 0.2, 1.5, 1.0
+
+
+def obs_layout(obs_dim: int) -> dict:
+    """Indices of the parts of an observation of an n-link cart, n = (obs_dim - 2) / 3."""
+    n = (obs_dim - 2) // 3
+    return {"n": n, "x": 0, "sin": [1 + 2 * i for i in range(n)], "cos": [2 + 2 * i for i in range(n)],
+            "xd": 1 + 2 * n, "w": [2 + 2 * n + i for i in range(n)]}
 
 
 def stable_obs(obs):
     """Is the observed state stable upright? Works on raw observations (single or batched)."""
-    cos_limit = jnp.cos(STABLE_ANGLE)
-    return ((obs[..., 2] > cos_limit) & (obs[..., 4] > cos_limit)
-            & (jnp.abs(obs[..., 6]) * 10.0 < STABLE_RATE) & (jnp.abs(obs[..., 7]) * 10.0 < STABLE_RATE)
-            & (jnp.abs(obs[..., 5]) * 3.0 < STABLE_CART_SPEED))
+    lay = obs_layout(obs.shape[-1])
+    return (jnp.all(obs[..., lay["cos"]] > jnp.cos(STABLE_ANGLE), axis=-1)
+            & jnp.all(jnp.abs(obs[..., lay["w"]]) * 10.0 < STABLE_RATE, axis=-1)
+            & (jnp.abs(obs[..., lay["xd"]]) * 3.0 < STABLE_CART_SPEED))
 
 
 class EnvState(NamedTuple):
-    q: jax.Array            # (3,) positions
-    qd: jax.Array           # (3,) velocities
+    q: jax.Array            # (n + 1,) positions
+    qd: jax.Array           # (n + 1,) velocities
     t: jax.Array            # step counter within the episode
     ep_return: jax.Array    # running return, for logging
     push_left: jax.Array    # steps left of the current push (0 = no push)
@@ -60,7 +83,7 @@ class EnvState(NamedTuple):
     up_in_window: jax.Array   # upright steps within the last SUCCESS_WINDOW of the episode
     shielded: jax.Array     # did the track shield override the action in the last step?
     start_replay: jax.Array  # did the episode start from a replayed hard state?
-    hist: jax.Array         # (H, 6) ring buffer of recent (q, qd), H = REPLAY_LOOKBACK / dt
+    hist: jax.Array         # (H, 2n + 2) ring buffer of recent (q, qd), H = REPLAY_LOOKBACK / dt
 
 
 def wrap(angle):
@@ -68,16 +91,14 @@ def wrap(angle):
 
 
 @dataclass(frozen=True)
-class DoublePendulumCart:
+class PendulumCart:
     cart_mass: float = 1.0
-    m1: float = 0.3
-    m2: float = 0.3
-    l1: float = 0.5
-    l2: float = 0.5
+    link_masses: tuple = (0.3, 0.3)     # point mass at the top of each link [kg]; n = len()
+    link_lengths: tuple = (0.5, 0.5)    # [m]
     g: float = 9.81
     max_force: float = 30.0   # 20 N could not pump enough energy within the track
     dt: float = 0.01          # control period (100 Hz)
-    substeps: int = 2         # RK4 substeps per control step (5 ms, as at 50 Hz x 4)
+    substeps: int = 2         # RK4 substeps per control step (5 ms, as at 50 Hz x 4); use 4 for 3+ links
     max_steps: int = 2000     # 20 s episodes
     x_limit: float = 3.0      # cart leaves the track -> terminate
     off_track_penalty: float = 0.0  # one-off reward when the cart leaves the track
@@ -117,79 +138,115 @@ class DoublePendulumCart:
     energy_scale: float = 3.0     # 10 made the early swing-up pump hard enough to leave the track
     shaping_gamma: float = 0.9975  # must equal the PPO discount for the potential form
 
-    obs_dim = 8
     act_dim = 1
+
+    def __post_init__(self):
+        assert len(self.link_masses) == len(self.link_lengths) >= 1
+        object.__setattr__(self, "link_masses", tuple(float(m) for m in self.link_masses))
+        object.__setattr__(self, "link_lengths", tuple(float(v) for v in self.link_lengths))
+
+    @property
+    def n(self) -> int:
+        return len(self.link_masses)
+
+    @property
+    def obs_dim(self) -> int:
+        return 2 + 3 * self.n
+
+    @property
+    def state_dim(self) -> int:
+        return 2 * (self.n + 1)
 
     def to_dict(self):
         return asdict(self)
 
+    # Constant arrays of the chain (numpy, so they are compile-time constants).
+    @property
+    def _m(self):
+        return np.array(self.link_masses)
+
+    @property
+    def _l(self):
+        return np.array(self.link_lengths)
+
+    @property
+    def _mu(self):
+        """Mass carried by each link: mu_i = sum_{k >= i} m_k."""
+        return np.cumsum(self._m[::-1])[::-1]
+
+    @property
+    def _mu_pair(self):
+        idx = np.arange(self.n)
+        return self._mu[np.maximum.outer(idx, idx)]
+
     # ---- physics ------------------------------------------------------------
 
     def dynamics(self, q, qd, force, tip_force=(0.0, 0.0), gravity_scale=1.0, damping=0.0):
-        """Accelerations qdd from  D(q) qdd = tau - C(q, qd) qd - G(q).
+        """Accelerations q'' from D(q) q'' = rhs (see the module docstring).
 
-        force acts horizontally on the cart; tip_force = (fx, fy) acts on the upper mass and
+        force acts horizontally on the cart; tip_force = (fx, fy) acts on the top mass and
         enters as generalized forces J^T f, with J the Jacobian of the tip position.
         gravity_scale and damping (a drag torque -damping * w on each link, like a thick
         atmosphere) only differ from 1 and 0 during training, set by the curriculum.
         """
-        M, m1, m2, l1, l2, g = self.cart_mass, self.m1, self.m2, self.l1, self.l2, self.g * gravity_scale
-        _, th1, th2 = q
-        _, w1, w2 = qd
+        g = self.g * gravity_scale
+        th, w = q[1:], qd[1:]
         fx, fy = tip_force
-        c1, s1, c2, s2 = jnp.cos(th1), jnp.sin(th1), jnp.cos(th2), jnp.sin(th2)
-        c12, s12 = jnp.cos(th1 - th2), jnp.sin(th1 - th2)
-        D = jnp.array([
-            [M + m1 + m2, (m1 + m2) * l1 * c1, m2 * l2 * c2],
-            [(m1 + m2) * l1 * c1, (m1 + m2) * l1**2, m2 * l1 * l2 * c12],
-            [m2 * l2 * c2, m2 * l1 * l2 * c12, m2 * l2**2],
-        ])
-        rhs = jnp.array([
-            force + fx + (m1 + m2) * l1 * s1 * w1**2 + m2 * l2 * s2 * w2**2,
-            (m1 + m2) * g * l1 * s1 - m2 * l1 * l2 * s12 * w2**2 + l1 * (fx * c1 - fy * s1) - damping * w1,
-            m2 * g * l2 * s2 + m2 * l1 * l2 * s12 * w1**2 + l2 * (fx * c2 - fy * s2) - damping * w2,
-        ])
-        return jnp.linalg.solve(D, rhs)
+        c, s = jnp.cos(th), jnp.sin(th)
+        l, mu, mu_pair = self._l, self._mu, self._mu_pair
+        diff = th[:, None] - th[None, :]
+        pair = mu_pair * np.outer(l, l)
+        D = jnp.zeros((self.n + 1, self.n + 1))
+        D = D.at[0, 0].set(self.cart_mass + self._m.sum())
+        D = D.at[0, 1:].set(mu * l * c).at[1:, 0].set(mu * l * c)
+        D = D.at[1:, 1:].set(pair * jnp.cos(diff))
+        rhs_x = force + fx + jnp.sum(mu * l * s * w**2)
+        rhs_th = (g * mu * l * s - (pair * jnp.sin(diff)) @ (w**2)
+                  + l * (fx * c - fy * s) - damping * w)
+        return jnp.linalg.solve(D, jnp.concatenate([rhs_x[None], rhs_th]))
+
+    def mass_positions(self, q):
+        """(x, y) of each point mass relative to the cart pivot, (n,) each."""
+        th = q[1:]
+        return jnp.cumsum(self._l * jnp.sin(th)), jnp.cumsum(self._l * jnp.cos(th))
+
+    def mass_velocities(self, q, qd, include_cart=True):
+        """(vx, vy) of each point mass, (n,) each; without the cart's own motion if include_cart is False."""
+        th, w = q[1:], qd[1:]
+        vx = jnp.cumsum(self._l * jnp.cos(th) * w) + (qd[0] if include_cart else 0.0)
+        vy = -jnp.cumsum(self._l * jnp.sin(th) * w)
+        return vx, vy
 
     def energy(self, q, qd):
         """Total mechanical energy of cart + pendulum (used by the tests)."""
-        xd = qd[0]
-        v2x, v2y = self.tip_velocity(q, qd)
-        v1x = xd + self.l1 * jnp.cos(q[1]) * qd[1]
-        v1y = -self.l1 * jnp.sin(q[1]) * qd[1]
-        kinetic = 0.5 * (self.cart_mass * xd**2 + self.m1 * (v1x**2 + v1y**2) + self.m2 * (v2x**2 + v2y**2))
+        vx, vy = self.mass_velocities(q, qd)
+        kinetic = 0.5 * (self.cart_mass * qd[0] ** 2 + jnp.sum(self._m * (vx**2 + vy**2)))
         return kinetic + self.potential(q)
 
     def potential(self, q):
-        _, th1, th2 = q
-        return self.g * ((self.m1 + self.m2) * self.l1 * jnp.cos(th1) + self.m2 * self.l2 * jnp.cos(th2))
+        return self.g * jnp.sum(self._mu * self._l * jnp.cos(q[1:]))
 
     def pendulum_energy(self, q, qd, gravity_scale=1.0):
         """Energy of the links as seen from the cart (cart motion excluded), so sliding
         the cart doesn't count. Equals target_energy when standing still upright."""
-        _, th1, th2 = q
-        _, w1, w2 = qd
-        v2x = self.l1 * jnp.cos(th1) * w1 + self.l2 * jnp.cos(th2) * w2
-        v2y = -self.l1 * jnp.sin(th1) * w1 - self.l2 * jnp.sin(th2) * w2
-        kinetic = 0.5 * (self.m1 * (self.l1 * w1) ** 2 + self.m2 * (v2x**2 + v2y**2))
-        return kinetic + gravity_scale * self.potential(q)
+        vx, vy = self.mass_velocities(q, qd, include_cart=False)
+        return 0.5 * jnp.sum(self._m * (vx**2 + vy**2)) + gravity_scale * self.potential(q)
 
     @property
     def target_energy(self):
-        return self.g * ((self.m1 + self.m2) * self.l1 + self.m2 * self.l2)
+        return float(self.g * np.sum(self._mu * self._l))
 
     def tip_velocity(self, q, qd):
-        _, th1, th2 = q
-        xd, w1, w2 = qd
-        return (xd + self.l1 * jnp.cos(th1) * w1 + self.l2 * jnp.cos(th2) * w2,
-                -self.l1 * jnp.sin(th1) * w1 - self.l2 * jnp.sin(th2) * w2)
+        vx, vy = self.mass_velocities(q, qd)
+        return vx[-1], vy[-1]
 
     def integrate(self, q, qd, force, tip_force=(0.0, 0.0), gravity_scale=1.0, damping=0.0):
         """Advance one control period with fixed-step RK4 (forces held constant)."""
         h = self.dt / self.substeps
+        k = self.n + 1
 
         def f(y):
-            return jnp.concatenate([y[3:], self.dynamics(y[:3], y[3:], force, tip_force, gravity_scale, damping)])
+            return jnp.concatenate([y[k:], self.dynamics(y[:k], y[k:], force, tip_force, gravity_scale, damping)])
 
         y = jnp.concatenate([q, qd])
         for _ in range(self.substeps):  # unrolled at trace time
@@ -198,11 +255,11 @@ class DoublePendulumCart:
             k3 = f(y + 0.5 * h * k2)
             k4 = f(y + h * k3)
             y = y + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
-        q = y[:3].at[1:].set(wrap(y[1:3]))
-        return q, y[3:]
+        q = y[:k].at[1:].set(wrap(y[1:k]))
+        return q, y[k:]
 
     def is_upright(self, q):
-        return (jnp.cos(q[1]) > jnp.cos(UPRIGHT_ANGLE)) & (jnp.cos(q[2]) > jnp.cos(UPRIGHT_ANGLE))
+        return jnp.all(jnp.cos(q[1:]) > jnp.cos(UPRIGHT_ANGLE))
 
     # ---- RL interface -------------------------------------------------------
 
@@ -219,7 +276,7 @@ class DoublePendulumCart:
         +-1 m and +-0.5 m/s up to +-2.5 m and +-1.5 m/s: hard starts close to the ends."""
         k_mode, k_x, k_th, k_w = jax.random.split(key, 4)
         mode = jax.random.choice(k_mode, 3, p=jnp.array(mix))
-        u = lambda k, lo, hi: jax.random.uniform(k, (2,), minval=lo, maxval=hi)  # noqa: E731
+        u = lambda k, lo, hi: jax.random.uniform(k, (self.n,), minval=lo, maxval=hi)  # noqa: E731
         ks = jax.random.split(k_th, 3)
         kw = jax.random.split(k_w, 3)
         th = jnp.select(
@@ -231,9 +288,8 @@ class DoublePendulumCart:
         x, xd = jax.random.uniform(k_x, (2,), minval=-1.0, maxval=1.0)
         x, xd = x * (1.0 + 1.5 * cart_spread), xd * (0.5 + 1.0 * cart_spread)
         x, xd = jnp.where(mode == 0, noise * x, x), jnp.where(mode == 0, noise * xd, xd)
-        q = jnp.array([x, *wrap(th)])
-        qd = jnp.array([xd, *w])
-        i0, f0 = jnp.int32(0), jnp.float32(0.0)
+        q = jnp.concatenate([x[None], wrap(th)])
+        qd = jnp.concatenate([xd[None], w])
         return self.make_state(q, qd, mode == 2)
 
     def make_state(self, q, qd, start_upright=False, start_replay=False) -> EnvState:
@@ -244,31 +300,25 @@ class DoublePendulumCart:
                         jnp.asarray(start_replay, bool), hist)
 
     def obs(self, state: EnvState):
-        x, th1, th2 = state.q
-        xd, w1, w2 = state.qd
-        return jnp.array([
-            x / self.x_limit,
-            jnp.sin(th1), jnp.cos(th1),
-            jnp.sin(th2), jnp.cos(th2),
-            xd / 3.0, w1 / 10.0, w2 / 10.0,
-        ])
+        th = state.q[1:]
+        trig = jnp.stack([jnp.sin(th), jnp.cos(th)], axis=-1).reshape(-1)  # sin1, cos1, sin2, ...
+        return jnp.concatenate([(state.q[0] / self.x_limit)[None], trig, (state.qd[0] / 3.0)[None], state.qd[1:] / 10.0])
 
     def reward(self, q, qd, a):
         """Task reward (without energy shaping)."""
-        x, th1, th2 = q
-        _, w1, w2 = qd
+        x, th, w = q[0], q[1:], qd[1:]
         # Upright term, 1 at the top: half a broad term that still guides from far away
         # (0 when a link hangs down) and half a sharp bump around vertical. The broad term
         # alone is very flat near the top (still 0.7 at 0.8 rad off), which made wobbling
         # nearly as good as balancing and balancing slow to learn.
-        broad = (1 + jnp.cos(th1)) / 2 * (1 + jnp.cos(th2)) / 2
-        sharp = jnp.exp(-(th1**2 + th2**2) / (2 * self.upright_sigma**2))
+        broad = jnp.prod((1 + jnp.cos(th)) / 2)
+        sharp = jnp.exp(-jnp.sum(th**2) / (2 * self.upright_sigma**2))
         upright = 0.5 * broad + 0.5 * sharp
         r = (upright
              - 0.05 * (x / self.x_limit) ** 2
              - self.upright_centring * sharp * (x / self.x_limit) ** 2
              - 0.01 * a**2
-             - 0.01 * broad * (w1**2 + w2**2))  # near the top: settle, don't whirl through
+             - 0.01 * broad * jnp.sum(w**2))  # near the top: settle, don't whirl through
         # Kept >= 0 so that ending the episode early (leaving the track) is never attractive.
         return jnp.maximum(r, 0.0)
 
@@ -340,7 +390,7 @@ class DoublePendulumCart:
         knobs holds the curriculum settings (traced, so they can change without recompiling):
         energy_weight, push_level, start_mix (3 probabilities), start_spread, start_noise,
         cart_spread, episode_steps, gravity_scale, damping, and replay starts: replay_prob and a
-        buffer replay_s (B, 6) of (q, qd) with replay_n valid entries.
+        buffer replay_s (B, 2n + 2) of (q, qd) with replay_n valid entries.
         Returns (state, obs, reward, info). info["final_obs"] is the observation before the
         reset, so the trainer can bootstrap the value of time-limit truncations.
         """
@@ -384,10 +434,14 @@ class DoublePendulumCart:
         k_reset, k_replay, k_pick = jax.random.split(k_reset, 3)
         reset_state = self.reset(k_reset, knobs["start_mix"], knobs["start_spread"], knobs["start_noise"],
                                  knobs.get("cart_spread", 0.0))
-        replay_s, replay_n = knobs.get("replay_s", jnp.zeros((1, 6))), knobs.get("replay_n", 0)
+        replay_s, replay_n = knobs.get("replay_s", jnp.zeros((1, self.state_dim))), knobs.get("replay_n", 0)
         pick = replay_s[jax.random.randint(k_pick, (), 0, jnp.maximum(replay_n, 1))]
-        replayed = self.make_state(pick[:3], pick[3:], start_replay=True)
+        replayed = self.make_state(pick[:self.n + 1], pick[self.n + 1:], start_replay=True)
         use_replay = (replay_n > 0) & (jax.random.uniform(k_replay) < knobs.get("replay_prob", 0.0))
         reset_state = jax.tree.map(lambda r, n: jnp.where(use_replay, r, n), replayed, reset_state)
         state = jax.tree.map(lambda r, n: jnp.where(done, r, n), reset_state, next_state)
         return state, self.obs(state), reward, info
+
+
+# The class was called DoublePendulumCart before it handled n links; the name stays usable.
+DoublePendulumCart = PendulumCart

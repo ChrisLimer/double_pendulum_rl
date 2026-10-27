@@ -9,43 +9,62 @@ export function wrap(a) {
   return ((((a + Math.PI) % twoPi) + twoPi) % twoPi) - Math.PI;
 }
 
-// D(q) qdd = rhs, see DoublePendulumCart.dynamics. tip = [fx, fy] acts on the upper mass.
+// The chain: masses m, lengths l and the mass carried by each link, mu_i = sum_{k>=i} m_k.
+// Runs from before the n-link code have m1/m2/l1/l2 instead of link_masses/link_lengths.
+export function chain(env) {
+  const m = env.link_masses ?? [env.m1, env.m2], l = env.link_lengths ?? [env.l1, env.l2];
+  const mu = m.map((_, i) => m.slice(i).reduce((a, b) => a + b, 0));
+  return { n: m.length, m, l, mu };
+}
+
+// Solve A x = b by Gaussian elimination with partial pivoting (A is small: (n + 1) x (n + 1)).
+function solve(A, b) {
+  const n = b.length, M = A.map((row, i) => [...row, b[i]]);
+  for (let c = 0; c < n; c++) {
+    let p = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+    [M[c], M[p]] = [M[p], M[c]];
+    for (let r = c + 1; r < n; r++) {
+      const f = M[r][c] / M[c][c];
+      for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k];
+    }
+  }
+  const x = new Array(n).fill(0);
+  for (let r = n - 1; r >= 0; r--) {
+    let s = M[r][n];
+    for (let k = r + 1; k < n; k++) s -= M[r][k] * x[k];
+    x[r] = s / M[r][r];
+  }
+  return x;
+}
+
+// D(q) qdd = rhs, see PendulumCart.dynamics (dprl/env.py). tip = [fx, fy] acts on the top mass.
 export function dynamics(env, q, qd, force, tip) {
-  const { cart_mass: M, m1, m2, l1, l2, g } = env;
-  const [, th1, th2] = q;
-  const [, w1, w2] = qd;
-  const [fx, fy] = tip;
-  const c1 = Math.cos(th1), s1 = Math.sin(th1), c2 = Math.cos(th2), s2 = Math.sin(th2);
-  const c12 = Math.cos(th1 - th2), s12 = Math.sin(th1 - th2);
-  const D = [
-    [M + m1 + m2, (m1 + m2) * l1 * c1, m2 * l2 * c2],
-    [(m1 + m2) * l1 * c1, (m1 + m2) * l1 * l1, m2 * l1 * l2 * c12],
-    [m2 * l2 * c2, m2 * l1 * l2 * c12, m2 * l2 * l2],
-  ];
-  const rhs = [
-    force + fx + (m1 + m2) * l1 * s1 * w1 * w1 + m2 * l2 * s2 * w2 * w2,
-    (m1 + m2) * g * l1 * s1 - m2 * l1 * l2 * s12 * w2 * w2 + l1 * (fx * c1 - fy * s1),
-    m2 * g * l2 * s2 + m2 * l1 * l2 * s12 * w1 * w1 + l2 * (fx * c2 - fy * s2),
-  ];
-  return solve3(D, rhs);
+  const { n, m, l, mu } = chain(env);
+  const th = q.slice(1), w = qd.slice(1), [fx, fy] = tip, g = env.g;
+  const D = Array.from({ length: n + 1 }, () => new Array(n + 1).fill(0));
+  const rhs = new Array(n + 1).fill(0);
+  D[0][0] = env.cart_mass + m.reduce((a, b) => a + b, 0);
+  rhs[0] = force + fx;
+  for (let i = 0; i < n; i++) {
+    const c = Math.cos(th[i]), s = Math.sin(th[i]);
+    D[0][i + 1] = D[i + 1][0] = mu[i] * l[i] * c;
+    rhs[0] += mu[i] * l[i] * s * w[i] * w[i];
+    rhs[i + 1] = g * mu[i] * l[i] * s + l[i] * (fx * c - fy * s);
+    for (let j = 0; j < n; j++) {
+      const pair = mu[Math.max(i, j)] * l[i] * l[j];
+      D[i + 1][j + 1] = pair * Math.cos(th[i] - th[j]);
+      rhs[i + 1] -= pair * Math.sin(th[i] - th[j]) * w[j] * w[j];
+    }
+  }
+  return solve(D, rhs);
 }
 
-function det3(m) {
-  return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-       - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-       + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-}
-
-function solve3(A, b) {  // Cramer's rule; D is always well conditioned here
-  const d = det3(A);
-  return [0, 1, 2].map((col) => det3(A.map((row, i) => row.map((v, j) => (j === col ? b[i] : v)))) / d);
-}
-
-// One control period of RK4 with forces held constant (DoublePendulumCart.integrate).
+// One control period of RK4 with forces held constant (PendulumCart.integrate).
 export function integrate(env, q, qd, force, tip = [0, 0]) {
-  const h = env.dt / env.substeps;
-  const f = (y) => [y[3], y[4], y[5], ...dynamics(env, y.slice(0, 3), y.slice(3), force, tip)];
-  const add = (y, k, s) => y.map((v, i) => v + s * k[i]);
+  const h = env.dt / env.substeps, k = q.length;
+  const f = (y) => [...y.slice(k), ...dynamics(env, y.slice(0, k), y.slice(k), force, tip)];
+  const add = (y, d, s) => y.map((v, i) => v + s * d[i]);
   let y = [...q, ...qd];
   for (let n = 0; n < env.substeps; n++) {
     const k1 = f(y);
@@ -54,60 +73,71 @@ export function integrate(env, q, qd, force, tip = [0, 0]) {
     const k4 = f(add(y, k3, h));
     y = y.map((v, i) => v + (h / 6) * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]));
   }
-  return { q: [y[0], wrap(y[1]), wrap(y[2])], qd: y.slice(3) };
+  return { q: [y[0], ...y.slice(1, k).map(wrap)], qd: y.slice(k) };
 }
 
+// x / x_limit, (sin, cos) per link, cart speed / 3, link rates / 10 (PendulumCart.obs).
 export function obs(env, q, qd) {
-  const [x, th1, th2] = q;
-  const [xd, w1, w2] = qd;
-  return [x / env.x_limit, Math.sin(th1), Math.cos(th1), Math.sin(th2), Math.cos(th2),
-          xd / 3.0, w1 / 10.0, w2 / 10.0];
+  const th = q.slice(1);
+  return [q[0] / env.x_limit, ...th.flatMap((a) => [Math.sin(a), Math.cos(a)]), qd[0] / 3.0, ...qd.slice(1).map((v) => v / 10.0)];
+}
+
+// Velocities of the point masses relative to the cart (cart motion excluded).
+function relativeVelocities(env, q, qd) {
+  const { l } = chain(env);
+  let vx = 0, vy = 0;
+  return l.map((li, i) => {
+    vx += li * Math.cos(q[i + 1]) * qd[i + 1];
+    vy -= li * Math.sin(q[i + 1]) * qd[i + 1];
+    return [vx, vy];
+  });
 }
 
 export function pendulumEnergy(env, q, qd) {
-  const { m1, m2, l1, l2, g } = env;
-  const [, th1, th2] = q;
-  const [, w1, w2] = qd;
-  const v2x = l1 * Math.cos(th1) * w1 + l2 * Math.cos(th2) * w2;
-  const v2y = -l1 * Math.sin(th1) * w1 - l2 * Math.sin(th2) * w2;
-  const kinetic = 0.5 * (m1 * (l1 * w1) ** 2 + m2 * (v2x * v2x + v2y * v2y));
-  return kinetic + g * ((m1 + m2) * l1 * Math.cos(th1) + m2 * l2 * Math.cos(th2));
+  const { m, l, mu } = chain(env);
+  const kinetic = relativeVelocities(env, q, qd).reduce((acc, [vx, vy], i) => acc + 0.5 * m[i] * (vx * vx + vy * vy), 0);
+  return kinetic + env.g * l.reduce((acc, li, i) => acc + mu[i] * li * Math.cos(q[i + 1]), 0);
 }
 
 export function isUpright(q) {
-  return Math.cos(q[1]) > Math.cos(UPRIGHT_ANGLE) && Math.cos(q[2]) > Math.cos(UPRIGHT_ANGLE);
+  return q.slice(1).every((a) => Math.cos(a) > Math.cos(UPRIGHT_ANGLE));
 }
 
-export function points(env, q) {  // cart pivot, lower mass, tip (world coordinates, y up)
-  const [x, th1, th2] = q;
-  const p1 = [x + env.l1 * Math.sin(th1), env.l1 * Math.cos(th1)];
-  return [[x, 0], p1, [p1[0] + env.l2 * Math.sin(th2), p1[1] + env.l2 * Math.cos(th2)]];
+export function points(env, q) {  // cart pivot, then each mass up to the tip (world coordinates, y up)
+  const { l } = chain(env);
+  const pts = [[q[0], 0]];
+  l.forEach((li, i) => {
+    const [px, py] = pts[pts.length - 1];
+    pts.push([px + li * Math.sin(q[i + 1]), py + li * Math.cos(q[i + 1])]);
+  });
+  return pts;
 }
 
 export function tipVelocity(env, q, qd) {
-  const [, th1, th2] = q;
-  const [xd, w1, w2] = qd;
-  return [xd + env.l1 * Math.cos(th1) * w1 + env.l2 * Math.cos(th2) * w2,
-          -env.l1 * Math.sin(th1) * w1 - env.l2 * Math.sin(th2) * w2];
+  const rel = relativeVelocities(env, q, qd);
+  const [vx, vy] = rel[rel.length - 1];
+  return [qd[0] + vx, vy];
 }
 
-// Initial states, same distributions as DoublePendulumCart.reset.
+// Initial states, same distributions as PendulumCart.reset, for env's number of links.
 // mode: "still" (hanging still, the evaluator start), "hanging" (perturbed), "mix", "random" or "upright".
-export function reset(mode = "mix") {
+export function reset(mode = "mix", env = null) {
+  const n = env ? chain(env).n : 2;
   const u = (lo, hi) => lo + (hi - lo) * Math.random();
+  const each = (fn) => Array.from({ length: n }, fn);
   if (mode === "mix") {
     const r = Math.random();
     mode = r < 0.4 ? "hanging" : r < 0.7 ? "random" : "upright";
   }
-  if (mode === "still") {  // the evaluator's start (DoublePendulumCart.reset, hanging, noise 0)
-    return { q: [0, wrap(Math.PI + u(-0.02, 0.02)), wrap(Math.PI + u(-0.02, 0.02))], qd: [0, 0, 0] };
+  if (mode === "still") {  // the evaluator's start (reset, hanging, noise 0)
+    return { q: [0, ...each(() => wrap(Math.PI + u(-0.02, 0.02)))], qd: new Array(n + 1).fill(0) };
   }
   let th, w;
   // "hanging": perturbed hanging start (reset with noise 1)
-  if (mode === "hanging") { th = [Math.PI + u(-0.3, 0.3), Math.PI + u(-0.3, 0.3)]; w = [u(-0.5, 0.5), u(-0.5, 0.5)]; }
-  else if (mode === "random") { th = [u(-Math.PI, Math.PI), u(-Math.PI, Math.PI)]; w = [u(-3, 3), u(-3, 3)]; }
-  else { th = [u(-0.4, 0.4), u(-0.4, 0.4)]; w = [u(-1, 1), u(-1, 1)]; }
-  return { q: [u(-1, 1), wrap(th[0]), wrap(th[1])], qd: [u(-0.5, 0.5), w[0], w[1]] };
+  if (mode === "hanging") { th = each(() => Math.PI + u(-0.3, 0.3)); w = each(() => u(-0.5, 0.5)); }
+  else if (mode === "random") { th = each(() => u(-Math.PI, Math.PI)); w = each(() => u(-3, 3)); }
+  else { th = each(() => u(-0.4, 0.4)); w = each(() => u(-1, 1)); }
+  return { q: [u(-1, 1), ...th.map(wrap)], qd: [u(-0.5, 0.5), ...w] };
 }
 
 // Track shield, as DoublePendulumCart.apply_shield: full force toward the centre when braking at
@@ -160,12 +190,19 @@ function mlp(layers, o) {
 // Mirror symmetry, as dprl/networks.py: an observation's mirror image negates everything but the
 // cosines; symmetric networks average over a state and its mirror, plus a small tie-break push
 // near the hanging-still fixed point (where an exactly symmetric policy would output 0).
-const MIRROR = [-1, -1, 1, -1, 1, -1, -1, -1];
+// Observation layout for n links (obs length 2 + 3n), as env.obs_layout.
+function layout(len) {
+  const n = (len - 2) / 3, idx = (f) => Array.from({ length: n }, (_, i) => f(i));
+  return { n, cos: idx((i) => 2 + 2 * i), xd: 1 + 2 * n, w: idx((i) => 2 + 2 * n + i) };
+}
+// Mirror: everything negated except the cosines.
+const mirrorSigns = (len) => { const s = new Array(len).fill(-1); layout(len).cos.forEach((i) => (s[i] = 1)); return s; };
 const TIE_BREAK_FORCE = 0.3, TIE_BREAK_WIDTH = 0.05;
-const mirrorObs = (o) => o.map((v, i) => v * MIRROR[i]);
+const mirrorObs = (o) => { const s = mirrorSigns(o.length); return o.map((v, i) => v * s[i]); };
 
 function tieBreak(o) {
-  const d2 = [0, 1, 3, 5, 6, 7].reduce((acc, i) => acc + o[i] * o[i], 0);
+  const s = mirrorSigns(o.length);
+  const d2 = o.reduce((acc, v, i) => acc + (s[i] < 0 ? v * v : 0), 0);
   return TIE_BREAK_FORCE * Math.exp(-d2 / TIE_BREAK_WIDTH ** 2) * Math.min(Math.max(-o[2], 0), 1);
 }
 
@@ -226,8 +263,8 @@ export function timeToStable(critic, o, timeMax) {
 
 // The test the time prediction is trained for (env.stable_obs).
 export function isStable(o) {
-  const c = Math.cos(0.2);
-  return o[2] > c && o[4] > c && Math.abs(o[6]) * 10 < 1.5 && Math.abs(o[7]) * 10 < 1.5 && Math.abs(o[5]) * 3 < 1.0;
+  const lay = layout(o.length), c = Math.cos(0.2);
+  return lay.cos.every((i) => o[i] > c) && lay.w.every((i) => Math.abs(o[i]) * 10 < 1.5) && Math.abs(o[lay.xd]) * 3 < 1.0;
 }
 
 // Mirror image of a state: the system is symmetric under x -> -x, angles -> -angles (all

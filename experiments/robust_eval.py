@@ -29,10 +29,12 @@ def make_robust(env, n=128, push_levels=(0.2, 0.4)):
         k0, k1, kp = jax.random.split(key, 3)
         s0 = env.reset(k0, mix=mix)
         # "perturbed hanging": old distribution (cart +-1 m, +-0.3 rad, +-0.5 rad/s)
-        u = jax.random.uniform(k1, (5,), minval=-1, maxval=1)
+        # (for n links: cart, n angles, cart speed, the first n - 1 link rates; the last rate 0)
+        n = env.n
+        u = jax.random.uniform(k1, (2 * n + 1,), minval=-1, maxval=1)
         s0 = jax.lax.cond(hang_noise, lambda s: s._replace(
-            q=jnp.array([u[0], jnp.pi + 0.3 * u[1], jnp.pi + 0.3 * u[2]]),
-            qd=jnp.array([0.5 * u[3], 0.5 * u[4], 0.0])), lambda s: s, s0)
+            q=jnp.concatenate([u[:1], jnp.pi + 0.3 * u[1:n + 1]]),
+            qd=jnp.concatenate([0.5 * u[n + 1:], jnp.zeros(1)])), lambda s: s, s0)
         def step(c, k):
             s, off = c
             s = env.sample_push(k, s, pushes)

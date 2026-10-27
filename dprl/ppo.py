@@ -89,7 +89,7 @@ class Runner(NamedTuple):
     obs_stats: Stats
     ret: jax.Array          # running discounted return per env (for reward scaling)
     ret_stats: Stats
-    replay_s: jax.Array     # (replay_size, 6) hard states (q, qd)
+    replay_s: jax.Array     # (replay_size, 2n + 2) hard states (q, qd)
     replay_ptr: jax.Array
     replay_n: jax.Array
 
@@ -146,7 +146,7 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
         env_state = jax.vmap(env.reset)(jax.random.split(k_env, cfg.num_envs))
         obs = jax.vmap(env.obs)(env_state)
         return Runner(params, tx.init(params), env_state, obs, key, Stats.zeros(env.obs_dim),
-                      jnp.zeros(cfg.num_envs), Stats.zeros((1,)), jnp.zeros((cfg.replay_size, 6)),
+                      jnp.zeros(cfg.num_envs), Stats.zeros((1,)), jnp.zeros((cfg.replay_size, env.state_dim)),
                       jnp.int32(0), jnp.int32(0))
 
     def normalize(runner, obs):
@@ -201,7 +201,7 @@ def make_trainer(cfg: PPOConfig, env: DoublePendulumCart):
     def add_replay(runner, traj):
         """Write up to 64 new hard states per update into the ring buffer."""
         mask = traj.info["replay_candidate"].reshape(-1)
-        states = traj.info["replay_state"].reshape(-1, 6)
+        states = traj.info["replay_state"].reshape(-1, env.state_dim)
         order = jnp.argsort(~mask)[:64]  # candidates first
         valid = mask[order]
         pos = (runner.replay_ptr + jnp.cumsum(valid) - 1) % cfg.replay_size

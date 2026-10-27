@@ -1,3 +1,4 @@
+import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -289,3 +290,79 @@ def test_discrete_policy_trains_and_is_symmetric(tmp_path, monkeypatch):
     np.testing.assert_array_equal(loaded["bins"], [-1.0, 0.0, 1.0])
     # Loaded (numpy) params work under jit too.
     assert np.asarray(jax.jit(lambda o: actor(loaded, o)[0])(obs[:4])).shape == (4, 1)
+
+
+# ---- n-link pendulums ---------------------------------------------------------------------
+
+def test_two_links_reproduce_the_original_closed_form():
+    from tests.reference_two_link import two_link_dynamics
+    env = DoublePendulumCart()
+    keys = jax.random.split(jax.random.key(0), 5)
+    q = jax.random.uniform(keys[0], (64, 3), minval=-3, maxval=3)
+    qd = jax.random.uniform(keys[1], (64, 3), minval=-5, maxval=5)
+    force = jax.random.uniform(keys[2], (64,), minval=-30, maxval=30)
+    tip = jax.random.uniform(keys[3], (64, 2), minval=-10, maxval=10)
+    for gs, damp in [(1.0, 0.0), (0.5, 0.1)]:
+        new = jax.vmap(lambda a, b, f, t: env.dynamics(a, b, f, (t[0], t[1]), gs, damp))(q, qd, force, tip)
+        old = jax.vmap(lambda a, b, f, t: two_link_dynamics(a, b, f, (t[0], t[1]), gs, damp))(q, qd, force, tip)
+        np.testing.assert_allclose(new, old, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("n", [1, 3, 4])
+def test_n_link_physics(n):
+    # 3+ links move faster: 2.5 ms RK4 steps keep the energy error at float32 noise (5 ms: ~2e-4).
+    env = DoublePendulumCart(link_masses=(0.3,) * n, link_lengths=(0.5,) * n, substeps=4 if n > 2 else 2)
+    assert env.n == n and env.obs_dim == 2 + 3 * n and env.state_dim == 2 * n + 2
+    # Energy is conserved without force (2 s of free, chaotic motion).
+    q = jnp.concatenate([jnp.zeros(1), jnp.linspace(0.4, -0.3, n)])
+    qd = jnp.concatenate([jnp.array([0.5]), jnp.linspace(0.0, 1.0, n)])
+    e0 = env.energy(q, qd)
+    step = jax.jit(lambda q, qd: env.integrate(q, qd, 0.0))
+    for _ in range(200):
+        q, qd = step(q, qd)
+    assert abs(env.energy(q, qd) - e0) / abs(e0) < 1e-4
+    # Power balance of the tip force: dE/dt = f . v_tip.
+    fine = DoublePendulumCart(link_masses=(0.3,) * n, link_lengths=(0.5,) * n, dt=1e-3, substeps=1)
+    q, qd = q.at[1:].set(jnp.linspace(0.7, -1.1, n)), qd.at[1:].set(jnp.linspace(-1.0, 2.0, n))
+    f = (3.0, -2.0)
+    v = fine.tip_velocity(q, qd)
+    q2, qd2 = fine.integrate(q, qd, 0.0, f)
+    v2 = fine.tip_velocity(q2, qd2)
+    power = f[0] * (v[0] + v2[0]) / 2 + f[1] * (v[1] + v2[1]) / 2
+    assert np.isclose((fine.energy(q2, qd2) - fine.energy(q, qd)) / fine.dt, power, rtol=1e-2)
+    # Upright is an unstable equilibrium; the energy target is the energy standing still upright.
+    up = jnp.zeros(n + 1)
+    assert np.allclose(env.integrate(up, up, 0.0)[0], 0) and np.isclose(env.pendulum_energy(up, up), env.target_energy)
+    assert env.integrate(up.at[1:].set(0.05), up, 0.0)[0][1] > 0.05
+    # Observations and starts have the right shapes; hanging starts hang.
+    s = env.reset(jax.random.key(0), mix=(1.0, 0.0, 0.0))
+    assert s.q.shape == (n + 1,) and env.obs(s).shape == (env.obs_dim,) and np.all(np.cos(s.q[1:]) < -0.99)
+
+
+def test_triple_pendulum_symmetry_training_and_checkpoint(tmp_path, monkeypatch):
+    from dprl.networks import actor, critic_outputs, init_params, mirror_signs
+    env = DoublePendulumCart(link_masses=(0.3,) * 3, link_lengths=(0.5,) * 3)
+    params = init_params(jax.random.key(0), env.obs_dim, 1, (32, 32), symmetric=True, critic_heads=3)
+    params["actor"][-1]["w"] = params["actor"][-1]["w"] * 100
+    states = jax.vmap(lambda k: env.reset(k, mix=(0.0, 1.0, 0.0)))(jax.random.split(jax.random.key(1), 64))
+    obs = jax.vmap(env.obs)(states)
+    m = mirror_signs(env.obs_dim)
+    far = np.cos(states.q[:, 1]) > -0.5
+    np.testing.assert_allclose(actor(params, obs * m)[0][far], -actor(params, obs)[0][far], atol=1e-5)
+    np.testing.assert_allclose(critic_outputs(params, obs * m), critic_outputs(params, obs), atol=1e-5)
+    # Mirroring the state mirrors the observation.
+    mirrored = jax.vmap(lambda s: env.obs(s._replace(q=-s.q, qd=-s.qd)))(states)
+    np.testing.assert_allclose(mirrored, obs * m, atol=1e-6)
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path)
+    cfg = PPOConfig(total_timesteps=8 * 32 * 4, num_envs=8, num_steps=32, num_minibatches=4,
+                    updates_per_chunk=2, hidden=(32, 32))
+    init, train_chunk = make_trainer(cfg, env)
+    runner, metrics = train_chunk(init(jax.random.key(0)), Curriculum().knobs(0.1))
+    assert np.isfinite(metrics["loss"]).all()
+    run = runs.new_run(cfg, env, Curriculum())
+    runs.save_checkpoint(run, runner.params, {"update": 2, "env_steps": 512})
+    _, cfg2, env2 = runs.load_config(run)
+    loaded, _ = runs.load_checkpoint(runs.list_checkpoints(run)[-1], cfg2, env2)
+    assert env2 == env and env2.n == 3
+    ev = make_evaluator(env2, num_episodes=2)(loaded, jax.random.key(0))
+    assert 0.0 <= float(ev["score"]) <= 1.0

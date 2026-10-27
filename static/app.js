@@ -221,7 +221,7 @@ async function startEpisode() {
 }
 
 function resetEpisode() {
-  const s = sim.reset($("start-mode").value);
+  const s = sim.reset($("start-mode").value, live.env);
   Object.assign(live, { q: s.q, qd: s.qd, prevQ: s.q, t: 0, uprightTime: 0, acc: 0, ended: null, trail: [],
                         side: 0, sideSince: 0, flips: 0, predAtStart: null, stableAt: null });
 }
@@ -230,7 +230,7 @@ function resetEpisode() {
 function userTipForce() {
   const env = live.env, max = +$("push-strength").value;
   if (live.mouse) {
-    const tip = sim.points(env, live.q)[2], v = sim.tipVelocity(env, live.q, live.qd);
+    const tip = sim.points(env, live.q).at(-1), v = sim.tipVelocity(env, live.q, live.qd);
     let f = [0, 1].map((i) => SPRING * (live.mouse[i] - tip[i]) - DAMPING * v[i]);
     const mag = Math.hypot(...f);
     if (mag > max) f = f.map((c) => (c * max) / mag);
@@ -280,7 +280,7 @@ function controlStep() {
   ({ q: live.q, qd: live.qd } = sim.integrate(env, live.q, live.qd, live.action * env.max_force, live.tipForce));
   live.t += env.dt;
   if (sim.isUpright(live.q)) live.uprightTime += env.dt;
-  live.trail.push(sim.points(env, live.q)[2]);
+  live.trail.push(sim.points(env, live.q).at(-1));
   if (live.trail.length > 50) live.trail.shift();
 
   if (Math.abs(live.q[0]) > env.x_limit) end("cart left the track");
@@ -329,7 +329,8 @@ function draw() {
   if (!live.q) return;
 
   const env = live.env;
-  const L = env.l1 + env.l2;
+  const { m: masses, l: lengths } = sim.chain(env);
+  const L = lengths.reduce((a, b) => a + b, 0);
   // Equal scale on both axes; room for the pendulum both above and below the track.
   const scale = Math.min(W / (2 * (env.x_limit + 0.35)), H / (2 * L + 0.4));
   view = { scale, ox: W / 2, oy: H / 2 };
@@ -340,7 +341,7 @@ function draw() {
   const a = Math.min(live.acc / env.dt, 1);
   const q = live.q.map((v, i) => (i === 0 ? live.prevQ[0] + a * (v - live.prevQ[0])
                                           : live.prevQ[i] + a * sim.wrap(v - live.prevQ[i])));
-  const [pivot, p1, tip] = sim.points(env, q);
+  const pts = sim.points(env, q), pivot = pts[0], tip = pts.at(-1);
 
   // Track with end stops.
   ctx.lineWidth = 2;
@@ -369,11 +370,13 @@ function draw() {
   ctx.strokeStyle = text;
   ctx.lineWidth = Math.max(3, 0.03 * scale);
   ctx.lineCap = "round";
-  ctx.beginPath(); ctx.moveTo(...px(...pivot)); ctx.lineTo(...px(...p1)); ctx.lineTo(...px(...tip)); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(...px(...pivot));
+  for (const p of pts.slice(1)) ctx.lineTo(...px(...p));
+  ctx.stroke();
   ctx.fillStyle = accent;
-  for (const [p, m] of [[p1, env.m1], [tip, env.m2]]) {
-    ctx.beginPath(); ctx.arc(...px(...p), Math.sqrt(m) * 0.1 * scale, 0, 2 * Math.PI); ctx.fill();
-  }
+  pts.slice(1).forEach((p, i) => {
+    ctx.beginPath(); ctx.arc(...px(...p), Math.sqrt(masses[i]) * 0.1 * scale, 0, 2 * Math.PI); ctx.fill();
+  });
 
   // User force on the tip (0.05 m per N), and the drag line to the mouse.
   const orange = "#ffb04c";

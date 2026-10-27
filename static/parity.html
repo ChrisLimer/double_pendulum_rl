@@ -33,7 +33,7 @@
     const err = (a, b, angle = false) => Math.abs(angle ? wrap(a - b) : a - b) / (1 + Math.abs(b));
     for (let n = 0; n < ref.q.length; n++) {
       const { q, qd } = integrate(env, ref.q[n], ref.qd[n], ref.force[n], ref.tip[n]);
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < q.length; i++) {
         worst.next_q = Math.max(worst.next_q, err(q[i], ref.next_q[n][i], i > 0));
         worst.next_qd = Math.max(worst.next_qd, err(qd[i], ref.next_qd[n][i]));
       }

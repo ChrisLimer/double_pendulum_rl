@@ -3,6 +3,7 @@
     uv run train.py                       # train + dashboard at http://127.0.0.1:8000
     uv run train.py --total-steps 5e6 --no-server
     uv run train.py --group shield-test --label s1 --seed 1 --env shield=false --cur replay_share=0
+    uv run train.py --links 3             # triple pendulum (n equal links of 0.3 kg and 0.5 m)
 
 --env / --ppo / --cur KEY=VALUE override fields of DoublePendulumCart / PPOConfig / Curriculum
 (VALUE is parsed as JSON, so true, 0.5 and [256,256] work). Runs in a --group are ranked
@@ -78,6 +79,8 @@ def main():
                    help="how the energy reward is added (see DoublePendulumCart)")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--no-server", action="store_true", help="don't launch the dashboard")
+    p.add_argument("--links", type=int, help="number of pendulum links (equal links of 0.3 kg, 0.5 m; "
+                   "3+ links use 2.5 ms integration steps); default: the env's two links")
     p.add_argument("--group", help="put the run in runs/<group>/ (ranked together on the dashboard)")
     p.add_argument("--label", help="short name for the run, appended to its folder name")
     p.add_argument("--env", action="append", metavar="KEY=VALUE", help="DoublePendulumCart override")
@@ -87,8 +90,12 @@ def main():
 
     cfg = PPOConfig(**{"seed": args.seed, "total_timesteps": int(args.total_steps), "num_envs": args.num_envs,
                        **overrides(args.ppo)})
+    links = {}
+    if args.links:
+        links = {"link_masses": (0.3,) * args.links, "link_lengths": (0.5,) * args.links,
+                 "substeps": 4 if args.links > 2 else 2}
     env = DoublePendulumCart(**{"shaping_gamma": cfg.gamma, "energy_shaping": args.energy_shaping,
-                                **overrides(args.env)})
+                                **links, **overrides(args.env)})
     curriculum = Curriculum(**overrides(args.cur))
     run = new_run(cfg, env, curriculum, group=args.group, label=args.label)
     print(f"Run folder: {run.relative_to(ROOT)}  ({cfg.num_updates} updates, "

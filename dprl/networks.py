@@ -29,6 +29,9 @@ import math
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+from .env import obs_layout
 
 
 def init_mlp(key, sizes, out_scale):
@@ -48,8 +51,16 @@ def mlp(layers, x):
     return x @ layers[-1]["w"] + layers[-1]["b"]
 
 
-# Mirror of an observation (x, sin1, cos1, sin2, cos2, xd, w1, w2): cosines are unchanged.
-MIRROR = jnp.array([-1.0, -1.0, 1.0, -1.0, 1.0, -1.0, -1.0, -1.0])
+def mirror_signs(obs_dim: int) -> np.ndarray:
+    """Mirror of an observation (x, sin/cos per link, cart speed, link rates): everything is
+    negated except the cosines. Works for any number of links (obs_dim = 2 + 3n)."""
+    signs = -np.ones(obs_dim)
+    signs[obs_layout(obs_dim)["cos"]] = 1.0
+    return signs
+
+
+# The 2-link mirror, kept for callers that import it.
+MIRROR = jnp.asarray(mirror_signs(8))
 TIE_BREAK_FORCE = 0.3   # action units (x max_force)
 TIE_BREAK_WIDTH = 0.05  # observation units
 
@@ -70,15 +81,15 @@ def init_params(key, obs_dim, act_dim, hidden=(64, 64), symmetric=False, critic_
 
 def tie_break(obs):
     """A fixed push near the hanging-still fixed point of the mirror map (see module docstring)."""
-    asym = obs[..., [0, 1, 3, 5, 6, 7]]  # the components the mirror negates
+    asym = obs[..., np.flatnonzero(mirror_signs(obs.shape[-1]) < 0)]  # the components the mirror negates
     near = jnp.exp(-jnp.sum(asym**2, axis=-1, keepdims=True) / TIE_BREAK_WIDTH**2)
-    hanging = jnp.clip(-obs[..., 2:3], 0.0, 1.0)  # lower link pointing down
+    hanging = jnp.clip(-obs[..., 2:3], 0.0, 1.0)  # lowest link pointing down
     return TIE_BREAK_FORCE * near * hanging
 
 
 def mlp_and_mirror(layers, obs):
     """The network on obs and on its mirror image, in one batched pass (much cheaper than two)."""
-    out = mlp(layers, jnp.stack([obs, obs * MIRROR]))
+    out = mlp(layers, jnp.stack([obs, obs * mirror_signs(obs.shape[-1])]))
     return out[0], out[1]
 
 

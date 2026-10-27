@@ -56,7 +56,8 @@ def load_config(run: Path):
     cfg = PPOConfig(**{**ppo, "hidden": tuple(ppo["hidden"])})
     # Ignore env fields from older versions of the code so old runs still open.
     fields = DoublePendulumCart.__dataclass_fields__
-    env = DoublePendulumCart(**{k: v for k, v in config["env"].items() if k in fields})
+    env = DoublePendulumCart(**{k: tuple(v) if isinstance(v, list) else v
+                                for k, v in config["env"].items() if k in fields})
     return config, cfg, env
 
 
