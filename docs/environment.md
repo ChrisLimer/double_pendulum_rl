@@ -5,39 +5,59 @@ thousands of environments are stepped with `vmap` inside the jitted training loo
 
 ## System and dynamics
 
-Generalized coordinates `q = (x, th1, th2)`:
+The environment is a cart with a chain of n links: two by default, three or more by configuration
+(`PendulumCart(link_masses=..., link_lengths=...)`, or `train.py --links N`). The old name
+`DoublePendulumCart` still works.
+
+Generalized coordinates `q = (x, th_1, …, th_n)`:
 
 - `x`: cart position [m]
-- `th1`: angle of the lower link from vertical-up [rad], wrapped to [-π, π)
-- `th2`: angle of the upper link from vertical-up, also absolute (not relative to `th1`)
+- `th_i`: angle of link i (1 = lowest) from vertical-up [rad], wrapped to [-π, π). These are
+  absolute angles, not relative to the link below.
 
-Both links are massless rods with point masses at their ends.
+The links are massless rods with point masses at their upper ends.
 
 | Parameter | Value | |
 |---|---|---|
 | cart mass | 1.0 kg | |
-| link masses m1, m2 | 0.3 kg each | |
-| link lengths l1, l2 | 0.5 m each | |
+| link masses | 0.3 kg each | `link_masses`, n = its length |
+| link lengths | 0.5 m each | `link_lengths` |
 | max cart force | 30 N | 20 N could not pump enough energy within the track |
 | track | ±3 m | leaving it ends the episode |
 | control rate | 100 Hz (`dt = 0.01`) | was 50 Hz in the first round of experiments |
-| integrator | RK4, 2 substeps (5 ms) | force held constant over the step |
+| integrator | RK4, 2 substeps (5 ms); 4 substeps (2.5 ms) for 3+ links | force held constant over the step |
 | episode | 20 s (2000 steps) | time-limit truncations are bootstrapped, not terminal |
 
-`dynamics()` solves `D(q) q̈ = τ − C(q, q̇) q̇ − G(q)` for the accelerations. A horizontal force on
-the tip (the random pushes, or the mouse in the dashboard) enters as the generalized force `Jᵀf`,
+`dynamics()` solves `D(q) q̈ = rhs` for the accelerations, in closed form for any n. Let
+μ_i = Σ_{k≥i} m_k be the mass carried by link i, and μ_ij = μ_max(i,j):
+
+```
+D_xx = M + Σ m      D_xi = μ_i l_i cos θ_i      D_ij = μ_ij l_i l_j cos(θ_i − θ_j)
+rhs_x = F + f_x + Σ_i μ_i l_i sin θ_i ω_i²
+rhs_i = g μ_i l_i sin θ_i − Σ_j μ_ij l_i l_j sin(θ_i − θ_j) ω_j² + l_i (f_x cos θ_i − f_y sin θ_i) − c ω_i
+```
+
+For n = 2 this is exactly the original double-pendulum formula (`tests/reference_two_link.py`;
+the tests compare the two). A horizontal force on the tip (the random pushes, or the mouse in the dashboard) enters as the generalized force `Jᵀf`,
 with `J` the Jacobian of the tip position. Two extra arguments exist for the curriculum only
 (see [training.md](training.md)): `gravity_scale` and `damping`, a drag torque `−c·ω` on each link
 ("thick air"). They are 1 and 0 outside training, so the evaluator, the diagnostics and the
 dashboard always use the real physics.
 
-The tests check energy conservation without force, the power balance of the tip force
-(`dE/dt = f · v_tip`) and that upright is an unstable equilibrium.
+The tests check this for 1 to 4 links:
+- energy conservation without force
+- the power balance of the tip force, `dE/dt = f · v_tip`
+- that upright is an unstable equilibrium
+
+With 3+ links the motion is faster. 5 ms RK4 steps lose ~2·10⁻⁴ of the energy in 2 s of chaotic
+motion, and 2.5 ms steps keep it at float32 noise, hence 4 substeps.
 
 ## Observation and action
 
-`obs = (x / 3, sin th1, cos th1, sin th2, cos th2, ẋ / 3, ω1 / 10, ω2 / 10)`, 8 values. Sine and
-cosine avoid the wrap-around jump at ±π. The action `a ∈ [−1, 1]` is the cart force divided by
+`obs = (x / 3, sin θ_1, cos θ_1, …, sin θ_n, cos θ_n, ẋ / 3, ω_1 / 10, …, ω_n / 10)`, 2 + 3n values
+(8 for the double pendulum, 11 for the triple). Sine and cosine avoid the wrap-around jump at ±π.
+`obs_layout()` gives the indices. The mirror image of an observation negates everything except
+the cosines. The action `a ∈ [−1, 1]` is the cart force divided by
 30 N (clipped).
 
 ## Reward
@@ -47,10 +67,10 @@ Per step, `r = task + track_bonus + energy_shaping`, as in `DoublePendulumCart.s
 **Task reward** (`reward()`, clipped at ≥ 0 so ending the episode early is never attractive):
 
 ```
-broad   = (1 + cos th1)/2 · (1 + cos th2)/2           # 1 upright, 0 if a link hangs down
-sharp   = exp(−(th1² + th2²) / (2 · 0.25²))           # narrow bump around vertical
+broad   = Π_i (1 + cos θ_i)/2                         # 1 upright, 0 if a link hangs down
+sharp   = exp(−Σ_i θ_i² / (2 · 0.25²))                # narrow bump around vertical
 upright = 0.5 · broad + 0.5 · sharp
-task    = max(0, upright − 0.05 (x/3)² − 0.5 · sharp · (x/3)² − 0.01 a² − 0.01 · broad · (ω1² + ω2²))
+task    = max(0, upright − 0.05 (x/3)² − 0.5 · sharp · (x/3)² − 0.01 a² − 0.01 · broad · Σ_i ω_i²)
 ```
 
 The `0.5 · sharp · (x/3)²` term (`upright_centring`, added in phase A) pulls the cart back to

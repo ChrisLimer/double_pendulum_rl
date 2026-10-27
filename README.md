@@ -1,4 +1,4 @@
-# Double pendulum on a cart: one PPO policy for swing-up, balance and recovery
+# Double (or n-link) pendulum on a cart: one PPO policy for swing-up, balance and recovery
 
 A single neural-network policy, trained with PPO in pure JAX, that swings a double inverted
 pendulum up from hanging, balances it on a cart with a finite track, and recovers from pushes
@@ -38,6 +38,7 @@ That trains for 200M steps and opens the dashboard at http://127.0.0.1:8000. Run
 
 ```bash
 uv run train.py --total-steps 2e7 --no-server   # a short run without the dashboard
+uv run train.py --links 3                        # a triple pendulum (any n works)
 uv run serve.py                                  # dashboard only; follows the newest run
 uv run diagnose.py runs/<run>                    # behaviour by start type (hanging / random / upright)
 uv run experiments/robust_eval.py runs/<run>     # the stricter test used for the table above
@@ -46,7 +47,8 @@ uv run pytest                                    # tests (physics, rewards, curr
 
 ## How it works, in short
 
-- **Physics** ([dprl/env.py](dprl/env.py)): Lagrangian dynamics of a cart with two point-mass links,
+- **Physics** ([dprl/env.py](dprl/env.py)): Lagrangian dynamics of a cart with a chain of n point-mass
+  links (two by default; `--links N`),
   RK4 at 100 Hz control (2 substeps of 5 ms), 30 N max force, track of ±3 m (leaving it ends the
   episode). Pure functions, so the environment is `jit`/`vmap`-ed together with the policy.
 - **Reward**: upright term (half broad cosine, half sharp Gaussian), small cart-position, action and
